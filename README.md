@@ -15,6 +15,9 @@ https://github.com/user-attachments/assets/698365ab-964c-4e38-a605-82bec4879f60
 
 ## Setup
 
+To use this fork with Orca, see [First run](#first-run) for the source build.
+The npm commands below are for upstream Skepsis.
+
 Requires [Node.js](https://nodejs.org/) v22+.
 
 Run it without installing:
@@ -307,40 +310,87 @@ symlinks are not previewed.
 
 ## Send review comments to Orca
 
-Open your checkout as a workspace in the local Orca desktop app and install its
-`orca` CLI. Use Orca v1.4.277 or later for the CLI commands used here. From this
-fork's checkout, build once:
+### First run
+
+Use the local Orca desktop app **v1.4.277 or later** and open the exact
+checkout or Git worktree you want to review in Orca. The `orca` CLI must
+be on your PATH. If `command -v orca` finds nothing, or an older CLI still
+reports `Unknown command` for `orca agent list`, register the CLI again in
+Orca's **Settings → General → Orca CLI**.
+
+For the source build, use Node.js 24.11 or newer in the 24.x series
+(recommended), 22.18 or newer in the 22.x series, or 26 or later.
+
+Clone this fork and build it once:
 
 ```sh
-npm ci
-npm run build
+git clone --branch main https://github.com/caorong/skepsis.git /tmp/skepsis-orca &&
+  (cd /tmp/skepsis-orca && npm ci && npm run build)
 ```
 
-Then, from the **checkout you want to review**, run:
+Then **from the root of the checkout you want to review**, not from
+`/tmp/skepsis-orca`:
 
 ```sh
-node /path/to/skepsis/dist/cli.js --orca
+node /tmp/skepsis-orca/dist/cli.js --orca
 ```
 
-Click a diff line (or select a range) to write a comment. In **Existing agents**,
-select a specific Orca session to keep its context. In **Start a new agent**,
-select an enabled provider to launch in the same workspace with the comment as
-its first prompt. You can select several targets, then click **Send to Orca** or
-press Cmd/Ctrl+Enter. The comment card shows a separate delivery status for each
-agent. Keep reviewing without waiting for replies; read the replies in Orca.
-The **Comment** action still writes a local review marker instead.
+`--orca` enables the Orca agent picker for this run. Omit it to review
+locally without connecting to Orca. The npm command in [Setup](#setup) runs
+the upstream package, not this fork. If running `npx` against the fork's Git
+URL fails with this npm error, use the source build above:
 
-Only the exact local Orca worktree is offered. Sleeping terminal agents must
-be reopened in Orca before they can receive a comment. Orca may queue terminal
-mail until the agent checks its messages; a receipt is not an answer. For the
-first send to an existing agent, Skepsis creates a background **Skepsis review
-sender** shell tab to supply its own Orca sender identity. Leave this tab idle
-while reviewing; you can close it from Orca when done. If a delivery status is
-unclear, check Orca before manually resending to avoid duplicates.
+```
+GitFetcher requires an Arborist constructor to pack a tarball
+```
 
-This mode is opt-in, uses the existing loopback and per-run token protections,
-and cannot be combined with `--send`. It does not publish review comments,
-create new worktrees, or use npm's upstream `@oxide/skepsis` binary.
+### Update and start
+
+Stop the old Skepsis process (Ctrl+C in its terminal). With the
+`/tmp/skepsis-orca` clone on `main`, run this **from the checkout you want
+to review**:
+
+```sh
+git -C /tmp/skepsis-orca pull --ff-only &&
+  (cd /tmp/skepsis-orca && npm run build) &&
+  node /tmp/skepsis-orca/dist/cli.js --orca
+```
+
+This pulls the source and rebuilds without changing your current directory.
+If the update changed `package-lock.json` or dependencies are missing, run
+`(cd /tmp/skepsis-orca && npm ci)` before rebuilding. If macOS clears the
+clone from `/tmp`, repeat the first-run steps.
+
+### Ask an agent about a line
+
+1. In **Diff**, click the line's gutter **+** or select a range. Use
+   **Open full file** to see the surrounding working-copy code when
+   available. Switch to [**Files**](#review-complete-files) to browse the
+   entire Git worktree and ask about lines in unchanged files, even with
+   no diff.
+2. Write your question. Under **Existing agents**, select a specific
+   session in that worktree to reuse its context. Under **Start a new
+   agent**, select a provider to start a fresh session in the same worktree,
+   using the question and code excerpt as its first prompt.
+3. Choose one or more targets and click **Send to Orca** (or press
+   Cmd/Ctrl+Enter). The card shows a delivery status per target. You can
+   keep reviewing other files while agents work. Read replies in the
+   corresponding Orca sessions, not in Skepsis.
+
+Sending does not write to the source file. A local note in **Files** stays
+in the browser tab; the separate **Comment** action in **Diff** writes a
+review marker to the working copy.
+
+Only agents in the exact local Orca worktree are offered. Reopen sleeping
+terminal agents in Orca before sending. A terminal delivery receipt means
+the message was queued, not that the agent has read or answered it.
+Skepsis creates a background **Skepsis review sender** shell tab on the
+first send to an existing agent. Leave it idle while reviewing; you can
+close it when done. Check Orca before retrying an unclear send to avoid
+duplicates.
+
+Orca mode is local-only, uses a per-run token, and cannot be combined with
+`--send`. It does not publish review comments or create new worktrees.
 
 ## Embedding
 
