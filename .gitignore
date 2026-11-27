@@ -3,6 +3,8 @@ node_modules
 # output
 out
 dist/
+orca-plugin/dist/
+orca-plugin/.orca/
 *.tgz
 
 # code coverage

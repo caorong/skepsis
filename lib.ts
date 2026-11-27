@@ -15,6 +15,7 @@ import { realpathSync } from 'node:fs'
 import { buildApp } from './server/app.ts'
 import type { App } from './server/app.ts'
 import { buildDiffSource, detectVcs, repoRoot } from './server/diffSource.ts'
+import { createOrcaBridge, orcaRunner } from './server/orca.ts'
 import { callSend } from './server/send.ts'
 import type { SendFunction, SendPayload } from './server/send.ts'
 
@@ -43,6 +44,14 @@ export interface AppOptions {
   send?: SendFunction | null
   /** How long skepsis waits for `send`. Default 10 s */
   sendTimeoutMs?: number
+  /** Send review comments to agents in the local Orca workspace at `cwd`.
+   *  Mutually exclusive with `send` and requires `guard` (the default). */
+  orca?: boolean
+  /** Path to the `orca` CLI binary when `orca` is true. Defaults to `orca` on
+   *  PATH (with macOS Orca.app bundle fallback). */
+  orcaBinary?: string
+  /** Enable the repository Files browser tab. Requires `guard` (the default). */
+  repositoryBrowser?: boolean
   /** Default true: API requests need `token`, and /api/send needs a loopback
    *  Host and a matching Origin. False when the host application checks
    *  requests before they get here */
@@ -58,7 +67,24 @@ export interface AppOptions {
  *  root, on a combination of revisions the CLI refuses, or if the diff
  *  command fails, which it runs once to find out */
 export async function createApp(opts: AppOptions): Promise<App> {
-  const { cwd, send, sendTimeoutMs, guard, poll, tabSize, ...flags } = opts
+  const {
+    cwd,
+    send,
+    sendTimeoutMs,
+    orca,
+    orcaBinary,
+    repositoryBrowser,
+    guard,
+    poll,
+    tabSize,
+    ...flags
+  } = opts
+  if (orca && send) {
+    throw new Error('Choose either orca or send, not both.')
+  }
+  if (orca && guard === false) {
+    throw new Error('orca requires guard: true')
+  }
   const vcs = opts.vcs ?? detectVcs(cwd)
   // Diff paths are relative to the root but files are read and written
   // relative to cwd, so anywhere below the root the two disagree
@@ -73,5 +99,7 @@ export async function createApp(opts: AppOptions): Promise<App> {
     poll,
     tabSize,
     send: send && ((payload) => callSend(send, payload, sendTimeoutMs)),
+    orca: orca ? createOrcaBridge(root, orcaRunner(root, orcaBinary)) : undefined,
+    repositoryBrowser,
   })
 }

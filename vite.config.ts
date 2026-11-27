@@ -6,7 +6,7 @@
  * Copyright Oxide Computer Company
  */
 
-import { defineConfig } from 'vitest/config'
+import { configDefaults, defineConfig } from 'vitest/config'
 import react from '@vitejs/plugin-react'
 
 const rawApiHost = process.env['API_HOST'] || 'localhost'
@@ -18,6 +18,9 @@ const apiPort = process.env['API_PORT'] || 3742
 export default defineConfig({
   plugins: [react()],
   test: {
+    // The Orca plugin has its own test runner (`orca plugin test`) with the
+    // `orca/testing` loader, so keep vitest scoped to Skepsis itself.
+    exclude: [...configDefaults.exclude, 'orca-plugin/**'],
     // The server tests mutate per-process global state (isolateVcsConfig
     // rewrites process.env), so each test file needs its own process. Forks
     // is already the default pool; pinned because switching to threads would

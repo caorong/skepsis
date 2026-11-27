@@ -1,0 +1,96 @@
+{
+  "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
+  "manifestVersion": 2,
+  "id": "skepsis-review",
+  "name": "Skepsis Review",
+  "version": "0.1.0",
+  "description": "Local browser-based diff and repository code review powered by Skepsis, wired directly to Orca agents.",
+  "license": "MPL-2.0",
+  "engines": {
+    "orca": ">=1.4.248"
+  },
+  "execution": "trusted-worker",
+  "pluginApi": 1,
+  "main": "src/worker.ts",
+  "capabilities": [
+    { "kind": "workspace:read" },
+    { "kind": "settings:own" },
+    { "kind": "notifications:show" }
+  ],
+  "contributes": {
+    "commands": [
+      {
+        "id": "open-review",
+        "title": "Open Skepsis Review in Browser",
+        "when": "workspace"
+      },
+      {
+        "id": "stop-server",
+        "title": "Stop Skepsis Review Server",
+        "when": "global"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "open-review",
+        "key": "Mod+Alt+R",
+        "when": "workspace"
+      }
+    ],
+    "statusBarItems": [
+      {
+        "id": "skepsis-status",
+        "text": "Skepsis",
+        "icon": "code",
+        "tone": "neutral",
+        "tooltip": "Open Skepsis code review in browser",
+        "command": "open-review"
+      }
+    ],
+    "panels": [
+      {
+        "id": "review",
+        "title": "Skepsis",
+        "icon": "code",
+        "entry": "src/panel.tsx",
+        "ui": "components"
+      }
+    ],
+    "events": [{ "on": "workspace.changed" }, { "on": "workspace.removed" }],
+    "settings": [
+      {
+        "key": "openCommand",
+        "title": "Browser Open Command",
+        "description": "Optional command used to open the review URL (the URL is passed as the last argument). Leave empty to use the system default browser; e.g. open -a \"Google Chrome\" on macOS.",
+        "type": "string",
+        "default": "",
+        "placeholder": "open -a \"Google Chrome\""
+      },
+      {
+        "key": "tabSize",
+        "title": "Tab Size",
+        "description": "Tab width in columns shown in Skepsis diffs and files.",
+        "type": "integer",
+        "default": 2,
+        "minimum": 1,
+        "maximum": 16
+      },
+      {
+        "key": "diffBase",
+        "title": "Default Diff Base",
+        "description": "Optional git/jj base revision for diffs (e.g. HEAD or origin/main). Leave empty for Skepsis auto merge-base (with automatic HEAD fallback).",
+        "type": "string",
+        "default": "",
+        "placeholder": "Auto merge-base"
+      },
+      {
+        "key": "orcaBinary",
+        "title": "Orca CLI Path",
+        "description": "Optional explicit path to the orca CLI binary. Leave empty to use orca on PATH or the macOS Orca.app bundle.",
+        "type": "string",
+        "default": "",
+        "placeholder": "/Applications/Orca.app/Contents/Resources/bin/orca"
+      }
+    ]
+  }
+}

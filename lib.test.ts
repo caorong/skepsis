@@ -11,7 +11,13 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterAll, beforeAll, expect, it } from 'vitest'
 import { TOKEN_HEADER } from './shared/types.ts'
-import type { DiffResponse, ErrorResponse, FileContentsResponse } from './shared/types.ts'
+import type {
+  DiffResponse,
+  ErrorResponse,
+  FileContentsResponse,
+  OrcaTargetsResponse,
+  RepositoryFilesResponse,
+} from './shared/types.ts'
 import type { App, SendPayload } from './lib.ts'
 import { isolateVcsConfig, run } from './server/testUtil.ts'
 
@@ -105,4 +111,59 @@ it('calls send with the payload, and reports a throw as the error', async () => 
   const failed = await send('fail')
   expect(failed.status).toBe(502)
   expect(((await failed.json()) as ErrorResponse).error).toBe('no agent')
+})
+
+it('supports orca and repositoryBrowser options with guard enabled', async () => {
+  await expect(
+    createApp({ cwd: repo, revisions: 'HEAD', orca: true, send: () => {} }),
+  ).rejects.toThrow('Choose either orca or send, not both.')
+  await expect(
+    createApp({ cwd: repo, revisions: 'HEAD', orca: true, guard: false }),
+  ).rejects.toThrow('orca requires guard: true')
+
+  const bin = join(tmp, 'fake-orca')
+  await writeFile(
+    bin,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const reply = (result) => console.log(JSON.stringify({ ok: true, result }));
+if (args[0] === 'worktree' && args[1] === 'current') {
+  reply({ worktree: { id: 'wt-1', path: process.cwd(), displayName: 'Test WT', hostId: 'local' } });
+} else if (args[0] === 'agent' && args[1] === 'list') {
+  reply({ agents: [] });
+} else if (args[0] === 'agent' && args[1] === 'installed') {
+  reply({ agents: [{ id: 'codex', name: 'Codex' }] });
+} else {
+  process.exit(1);
+}
+`,
+    { mode: 0o755 },
+  )
+
+  const app = await createApp({
+    cwd: repo,
+    revisions: 'HEAD',
+    orca: true,
+    orcaBinary: bin,
+    repositoryBrowser: true,
+  })
+  const headers = { [TOKEN_HEADER]: app.token!, host: '127.0.0.1:4321' }
+  const diff = (await (
+    await app.fetch(new Request('http://127.0.0.1:4321/api/diff', { headers }))
+  ).json()) as DiffResponse
+  expect(diff.orca).toBe(true)
+  expect(diff.repositoryBrowser).toBe(true)
+  expect(diff.send).toBe(true)
+
+  const files = (await (
+    await app.fetch(new Request('http://127.0.0.1:4321/api/repository-files', { headers }))
+  ).json()) as RepositoryFilesResponse
+  expect(files.paths).toContain('sub/f.txt')
+  expect(files.orca).toBe(true)
+
+  const targets = (await (
+    await app.fetch(new Request('http://127.0.0.1:4321/api/orca/targets', { headers }))
+  ).json()) as OrcaTargetsResponse
+  expect(targets.workspace).toBe('Test WT')
+  expect(targets.fresh).toEqual([{ id: 'codex', label: 'Codex' }])
 })

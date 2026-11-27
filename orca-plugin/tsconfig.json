@@ -1,0 +1,17 @@
+{
+  "extends": "./.orca/types/tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM"],
+    "typeRoots": ["./.orca/types", "../node_modules/@types"],
+    "types": [
+      "orca",
+      "orca-host",
+      "orca-frame",
+      "orca-worker",
+      "orca-services",
+      "orca-testing",
+      "node"
+    ]
+  },
+  "include": ["src"]
+}

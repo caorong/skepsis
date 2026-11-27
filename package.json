@@ -23,6 +23,7 @@
   "scripts": {
     "dev": "vite",
     "build": "rm -rf dist && vite build && tsdown",
+    "build:orca-plugin": "npm run build && node scripts/build-orca-plugin.mjs",
     "prepack": "npm run build",
     "fmt": "oxfmt --write .",
     "fmt:check": "oxfmt --check .",

@@ -5,7 +5,10 @@
  */
 
 import { execFile } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { realpath } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { join } from 'node:path'
 import { promisify } from 'node:util'
 import { z } from 'zod'
 import type { OrcaTarget, OrcaTargetsResponse } from '../shared/types.ts'
@@ -71,21 +74,57 @@ const launchReceipt = z.object({
 type Run = (args: string[], mutating: boolean) => Promise<unknown>
 export type OrcaBridge = ReturnType<typeof createOrcaBridge>
 
-export function orcaRunner(cwd: string, binary = 'orca'): Run {
+function macosBundledOrca(): string | null {
+  if (process.platform !== 'darwin') return null
+  const candidates = [
+    '/Applications/Orca.app/Contents/Resources/bin/orca',
+    join(homedir(), 'Applications', 'Orca.app', 'Contents', 'Resources', 'bin', 'orca'),
+  ]
+  for (const candidate of candidates) {
+    if (existsSync(candidate)) return candidate
+  }
+  return null
+}
+
+export function orcaRunner(cwd: string, binary?: string): Run {
   // This bridge is deliberately local. Do not inherit a paired target from a shell.
   const env = { ...process.env }
   delete env.ORCA_ENVIRONMENT
+  const explicit = binary?.trim() || null
+  let resolvedBinary = explicit ?? 'orca'
+
+  const execOrca = (bin: string, args: string[], mutating: boolean) =>
+    exec(bin, [...args, '--json'], {
+      cwd,
+      env,
+      timeout: mutating ? 35_000 : 8_000,
+      maxBuffer: 8 * 1024 * 1024,
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+  const runBinary = async (args: string[], mutating: boolean): Promise<string> => {
+    try {
+      const { stdout } = await execOrca(resolvedBinary, args, mutating)
+      return stdout
+    } catch (error) {
+      const failure = error as NodeJS.ErrnoException
+      if (failure.code === 'ENOENT' && !explicit && resolvedBinary === 'orca') {
+        const bundled = macosBundledOrca()
+        if (bundled) {
+          const { stdout } = await execOrca(bundled, args, mutating)
+          resolvedBinary = bundled
+          return stdout
+        }
+      }
+      throw error
+    }
+  }
+
   return async (args, mutating) => {
     let stdout: string
     try {
-      ;({ stdout } = await exec(binary, [...args, '--json'], {
-        cwd,
-        env,
-        timeout: mutating ? 35_000 : 8_000,
-        maxBuffer: 8 * 1024 * 1024,
-        encoding: 'utf8',
-        windowsHide: true,
-      }))
+      stdout = await runBinary(args, mutating)
     } catch (error) {
       // execFile's error.message includes argv, including the review comment. Never echo it.
       const failure = error as NodeJS.ErrnoException & { stdout?: string; killed?: boolean }

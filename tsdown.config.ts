@@ -13,6 +13,7 @@ import { defineConfig } from 'tsdown'
 const common = {
   outDir: 'dist',
   clean: false,
+  nodeProtocol: true,
   outExtensions: () => ({ js: '.js' }),
 }
 

@@ -58,6 +58,8 @@ import type {
   RepositoryFile,
   RepositoryFilesResponse,
   RepositoryReview,
+  SymbolDefinition,
+  SymbolDefinitionsResponse,
   ErrorResponse,
   FileContentsResponse,
   ThemeMode,
@@ -77,6 +79,7 @@ import {
 } from '../shared/reviewComments.ts'
 import { diffChanges, type FileChange } from './diffChanges.ts'
 import { lineText as diffLineText, relocateLine } from './lineAnchor.ts'
+import { symbolAtPoint } from './symbolNavigation.ts'
 import { closeLine, openLineAt, selectionAnchor, textRange } from './textSelection.ts'
 
 const queryClient = new QueryClient({
@@ -221,6 +224,9 @@ const SEARCH_KEYS = isMac ? '⌘K' : 'Ctrl+K'
 const FIND_KEYS = isMac ? '⌘F' : 'Ctrl+F'
 const SUBMIT_KEYS = isMac ? '⌘⏎' : 'Ctrl+Enter'
 const INLINE_KEYS = isMac ? '⌥⌘⏎' : 'Ctrl+Alt+Enter'
+const GOTO_DEF_KEYS = isMac ? '⌘Click' : 'Ctrl+Click'
+const NAV_BACK_KEYS = isMac ? '⌥←' : 'Alt+←'
+const NAV_FWD_KEYS = isMac ? '⌥→' : 'Alt+→'
 
 function useToast(duration = 1400) {
   const [toast, setToast] = useState<{
@@ -535,6 +541,14 @@ const DIFF_CSS = `
   /* The text an open comment box is on (see markQuoteRef) */
   ::highlight(comment-quote) {
     background-color: rgba(56, 139, 253, 0.35);
+  }
+  /* Hovered identifier while holding Cmd/Ctrl for go-to-definition */
+  ::highlight(symbol-hover) {
+    text-decoration: underline;
+    background-color: rgba(56, 139, 253, 0.14);
+  }
+  :host([data-symbol-hover]) [data-content] [data-line] {
+    cursor: pointer;
   }
   /* The lines a review comment is on get blue numbers, and a bar down the
      gutter joins them to the comment (see railReviewLines). */
@@ -1599,11 +1613,37 @@ function ModeSwitch({
   )
 }
 
+function NavBackIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M7.78 12.53a.75.75 0 0 1-1.06 0L2.47 8.28a.75.75 0 0 1 0-1.06l4.25-4.25a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042L4.81 7h7.44a.75.75 0 0 1 0 1.5H4.81l2.97 2.97a.75.75 0 0 1 0 1.06Z"
+      />
+    </svg>
+  )
+}
+
+function NavForwardIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden="true">
+      <path
+        fill="currentColor"
+        d="M8.22 2.97a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l2.97-2.97H3.75a.75.75 0 0 1 0-1.5h7.44L8.22 4.03a.75.75 0 0 1 0-1.06Z"
+      />
+    </svg>
+  )
+}
+
 function ProgressBar({
   treeOpen,
   onToggleTree,
   mode,
   onModeChange,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
   command,
   fileHashes,
   viewed,
@@ -1616,6 +1656,10 @@ function ProgressBar({
   onToggleTree?: () => void
   mode?: ReviewMode
   onModeChange?: (mode: ReviewMode) => void
+  canGoBack?: boolean
+  canGoForward?: boolean
+  onGoBack?: () => void
+  onGoForward?: () => void
   command?: string
   fileHashes?: FileHashes
   viewed?: ViewedMap
@@ -1656,6 +1700,44 @@ function ProgressBar({
         </Tip>
       )}
       {mode && onModeChange && <ModeSwitch mode={mode} onModeChange={onModeChange} />}
+      {(canGoBack || canGoForward) && onGoBack && onGoForward && (
+        <div className="nav-history" role="group" aria-label="Navigation history">
+          <Tip
+            text={
+              <>
+                Back <kbd>{NAV_BACK_KEYS}</kbd>
+              </>
+            }
+          >
+            <button
+              type="button"
+              className="icon-button nav-history-button"
+              aria-label="Navigate back"
+              disabled={!canGoBack}
+              onClick={onGoBack}
+            >
+              <NavBackIcon />
+            </button>
+          </Tip>
+          <Tip
+            text={
+              <>
+                Forward <kbd>{NAV_FWD_KEYS}</kbd>
+              </>
+            }
+          >
+            <button
+              type="button"
+              className="icon-button nav-history-button"
+              aria-label="Navigate forward"
+              disabled={!canGoForward}
+              onClick={onGoForward}
+            >
+              <NavForwardIcon />
+            </button>
+          </Tip>
+        </div>
+      )}
       {/* title gives a native tooltip when the command is ellipsized */}
       {command && (
         <code className="diff-command" title={command}>
@@ -1759,6 +1841,8 @@ const SHORTCUTS: [string, string, 'send'?][] = [
   ['b', 'Toggle file tree'],
   [SEARCH_KEYS, 'Search files'],
   [FIND_KEYS, 'Find in diff'],
+  [GOTO_DEF_KEYS, 'Go to class or method definition'],
+  [`${NAV_BACK_KEYS} / ${NAV_FWD_KEYS}`, 'Navigate back / forward'],
   ['c', 'Comment on line'],
   [SUBMIT_KEYS, 'Send the comment to the --send command', 'send'],
   [INLINE_KEYS, 'Comment in the file (review marker)', 'send'],
@@ -2044,6 +2128,11 @@ function DiffView({
   mode,
   onModeChange,
   onOpenFile,
+  onSymbolLookup,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
   theme,
   resolvedTheme,
   onToggleTheme,
@@ -2057,6 +2146,11 @@ function DiffView({
   mode: ReviewMode
   onModeChange: (mode: ReviewMode) => void
   onOpenFile: (path: string, line?: number) => void
+  onSymbolLookup: (req: SymbolLookupRequest) => void
+  canGoBack: boolean
+  canGoForward: boolean
+  onGoBack: () => void
+  onGoForward: () => void
   theme: ThemeMode
   resolvedTheme: 'light' | 'dark'
   onToggleTheme: () => { stored: ThemeMode; resolved: 'light' | 'dark' }
@@ -3109,7 +3203,7 @@ function DiffView({
   // Selecting text in the diff opens the comment box on it, unless the open
   // box has a draft. A click in the code closes an empty box.
   const selectionUp = (e: MouseEvent) => {
-    if (e.button !== 0) return
+    if (e.button !== 0 || e.metaKey || e.ctrlKey) return
     const path = e.composedPath()
     const inPath = (selector: string) =>
       path.some((n) => n instanceof Element && n.matches(selector))
@@ -3179,6 +3273,15 @@ function DiffView({
       document.removeEventListener('mouseup', onMouseUp)
     }
   }, [active, send, commentsEnabled])
+
+  useSymbolNavigation({
+    active,
+    enabled: !!data?.repositoryBrowser,
+    paneRef,
+    fileForHost: (host) => hostFiles.current.get(host) ?? null,
+    originForHit: (file) => ({ mode: 'diff', file }),
+    onSymbolLookup,
+  })
 
   // A box on part of a line shows inside the line, after the screen row the
   // text ends on: it's slotted into the item host, into a slot put in the
@@ -3718,6 +3821,10 @@ function DiffView({
           <ProgressBar
             mode={data.repositoryBrowser ? mode : undefined}
             onModeChange={data.repositoryBrowser ? onModeChange : undefined}
+            canGoBack={canGoBack}
+            canGoForward={canGoForward}
+            onGoBack={onGoBack}
+            onGoForward={onGoForward}
             command={data.revset}
             resolvedTheme={resolvedTheme}
             onToggleTheme={onToggleTheme}
@@ -3762,6 +3869,10 @@ function DiffView({
             onToggleTree={toggleTree}
             mode={data.repositoryBrowser ? mode : undefined}
             onModeChange={data.repositoryBrowser ? onModeChange : undefined}
+            canGoBack={canGoBack}
+            canGoForward={canGoForward}
+            onGoBack={onGoBack}
+            onGoForward={onGoForward}
             command={data.revset}
             fileHashes={fileHashes}
             viewed={viewed}
@@ -3852,6 +3963,268 @@ function DiffView({
 }
 
 type FileReviewLocation = { path: string; line?: number }
+type NavEntry =
+  | { mode: 'diff'; file: string | null }
+  | { mode: 'files'; path: string; line?: number }
+
+type SymbolLookupRequest = {
+  origin: NavEntry
+  fromFile: string
+  line: number
+  symbol: string
+  receiver: string | null
+  isCall: boolean
+  anchor: { x: number; y: number }
+}
+
+type SymbolPopoverState = {
+  symbol: string
+  origin: NavEntry
+  definitions: SymbolDefinition[]
+  truncated: boolean
+  anchor: { x: number; y: number }
+}
+
+const SYMBOL_NAV_IGNORED_SELECTOR =
+  '.comment-form, [data-gutter], .symbol-popover, .file-header, .repo-toolbar'
+
+function isSymbolNavModifier(e: MouseEvent | KeyboardEvent): boolean {
+  return e.metaKey || e.ctrlKey
+}
+
+function clearSymbolHover(hosts: Element[]) {
+  if ('highlights' in CSS) CSS.highlights.delete('symbol-hover')
+  for (const h of hosts) h.removeAttribute('data-symbol-hover')
+}
+
+function useSymbolNavigation({
+  active,
+  enabled,
+  paneRef,
+  fileForHost,
+  originForHit,
+  onSymbolLookup,
+}: {
+  active: boolean
+  enabled: boolean
+  paneRef: React.RefObject<HTMLDivElement | null>
+  fileForHost: (host: Element) => string | null
+  originForHit: (file: string, line: number) => NavEntry
+  onSymbolLookup: (req: SymbolLookupRequest) => void
+}) {
+  const fileForHostRef = useRef(fileForHost)
+  fileForHostRef.current = fileForHost
+  const originForHitRef = useRef(originForHit)
+  originForHitRef.current = originForHit
+  const onLookupRef = useRef(onSymbolLookup)
+  onLookupRef.current = onSymbolLookup
+
+  useEffect(() => {
+    if (!active || !enabled) return
+    const getHosts = () => [...(paneRef.current?.querySelectorAll('diffs-container') ?? [])]
+    let lastPoint: { x: number; y: number } | null = null
+
+    const updateHover = (x: number, y: number) => {
+      const hosts = getHosts()
+      const hit = symbolAtPoint(hosts, x, y)
+      if (!hit || !fileForHostRef.current(hit.host)) {
+        clearSymbolHover(hosts)
+        return
+      }
+      for (const h of hosts) {
+        if (h === hit.host) h.setAttribute('data-symbol-hover', '')
+        else h.removeAttribute('data-symbol-hover')
+      }
+      if ('highlights' in CSS) {
+        CSS.highlights.set('symbol-hover', new Highlight(hit.range))
+      }
+    }
+
+    const onMouseMove = (e: MouseEvent) => {
+      lastPoint = { x: e.clientX, y: e.clientY }
+      if (!isSymbolNavModifier(e) || e.shiftKey || e.altKey) {
+        clearSymbolHover(getHosts())
+        return
+      }
+      if (
+        e
+          .composedPath()
+          .some((n) => n instanceof Element && n.matches(SYMBOL_NAV_IGNORED_SELECTOR))
+      ) {
+        clearSymbolHover(getHosts())
+        return
+      }
+      updateHover(e.clientX, e.clientY)
+    }
+
+    const onKeyDown = (e: KeyboardEvent) => {
+      if ((e.key === 'Meta' || e.key === 'Control') && lastPoint) {
+        updateHover(lastPoint.x, lastPoint.y)
+      }
+    }
+
+    const onKeyUp = (e: KeyboardEvent) => {
+      if (e.key === 'Meta' || e.key === 'Control') {
+        clearSymbolHover(getHosts())
+      }
+    }
+
+    const onBlur = () => clearSymbolHover(getHosts())
+
+    const onClick = (e: MouseEvent) => {
+      if (e.button !== 0 || !isSymbolNavModifier(e) || e.shiftKey || e.altKey) return
+      if (
+        e
+          .composedPath()
+          .some((n) => n instanceof Element && n.matches(SYMBOL_NAV_IGNORED_SELECTOR))
+      ) {
+        return
+      }
+      const hosts = getHosts()
+      const hit = symbolAtPoint(hosts, e.clientX, e.clientY)
+      if (!hit) return
+      const fromFile = fileForHostRef.current(hit.host)
+      if (!fromFile) return
+      e.preventDefault()
+      e.stopPropagation()
+      clearSymbolHover(hosts)
+      onLookupRef.current({
+        origin: originForHitRef.current(fromFile, hit.line),
+        fromFile,
+        line: hit.line,
+        symbol: hit.symbol,
+        receiver: hit.receiver,
+        isCall: hit.isCall,
+        anchor: { x: hit.rect.left, y: hit.rect.bottom + 6 },
+      })
+    }
+
+    document.addEventListener('mousemove', onMouseMove)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onBlur)
+    document.addEventListener('click', onClick, true)
+    return () => {
+      document.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onBlur)
+      document.removeEventListener('click', onClick, true)
+      clearSymbolHover(getHosts())
+    }
+  }, [active, enabled, paneRef])
+}
+
+function SymbolPopover({
+  popover,
+  onSelect,
+  onClose,
+}: {
+  popover: SymbolPopoverState
+  onSelect: (def: SymbolDefinition) => void
+  onClose: () => void
+}) {
+  const [selectedIndex, setSelectedIndex] = useState(0)
+  const panelRef = useRef<HTMLDivElement>(null)
+  const { definitions } = popover
+  const clampedIndex = Math.min(selectedIndex, Math.max(0, definitions.length - 1))
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        e.stopPropagation()
+        onClose()
+      } else if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        e.stopPropagation()
+        setSelectedIndex((i) => (i + 1) % definitions.length)
+      } else if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        e.stopPropagation()
+        setSelectedIndex((i) => (i - 1 + definitions.length) % definitions.length)
+      } else if (e.key === 'Enter') {
+        const chosen = definitions[clampedIndex]
+        if (!chosen) return
+        e.preventDefault()
+        e.stopPropagation()
+        onSelect(chosen)
+      }
+    }
+    const onPointerDown = (e: PointerEvent) => {
+      if (panelRef.current && !e.composedPath().includes(panelRef.current)) {
+        onClose()
+      }
+    }
+    window.addEventListener('keydown', onKeyDown, true)
+    document.addEventListener('pointerdown', onPointerDown, true)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true)
+      document.removeEventListener('pointerdown', onPointerDown, true)
+    }
+  }, [definitions, clampedIndex, onSelect, onClose])
+
+  const width = Math.min(540, Math.max(280, window.innerWidth - 24))
+  const estimatedHeight = Math.min(360, 44 + definitions.length * 46)
+  const left = Math.max(12, Math.min(popover.anchor.x, window.innerWidth - width - 12))
+  const top =
+    popover.anchor.y + estimatedHeight > window.innerHeight - 12
+      ? Math.max(12, popover.anchor.y - estimatedHeight - 28)
+      : Math.max(12, popover.anchor.y)
+
+  return (
+    <div
+      ref={panelRef}
+      className="symbol-popover"
+      role="dialog"
+      aria-label={`Definitions for ${popover.symbol}`}
+      style={{ left, top, width }}
+    >
+      <div className="symbol-popover-head">
+        <span className="symbol-popover-title">
+          Definitions for <code>{popover.symbol}</code>
+        </span>
+        <span className="symbol-popover-count">
+          {definitions.length}
+          {popover.truncated ? '+' : ''}
+        </span>
+        <span className="symbol-popover-hint">↑↓ ⏎ · Esc</span>
+        <button
+          type="button"
+          className="symbol-popover-close"
+          aria-label="Close definitions"
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </div>
+      <div className="symbol-popover-list" role="listbox">
+        {definitions.map((def, idx) => (
+          <button
+            key={`${def.path}:${def.line}`}
+            type="button"
+            role="option"
+            aria-selected={idx === clampedIndex}
+            className={'symbol-popover-row' + (idx === clampedIndex ? ' active' : '')}
+            onMouseEnter={() => setSelectedIndex(idx)}
+            onClick={() => onSelect(def)}
+          >
+            <div className="symbol-popover-meta">
+              <span className="symbol-kind-badge" data-kind={def.kind}>
+                {def.kind}
+              </span>
+              <span className="symbol-popover-loc" title={`${def.path}:${def.line}`}>
+                {def.path}:{def.line}
+              </span>
+              {def.reason && <span className="symbol-reason-badge">{def.reason}</span>}
+            </div>
+            <code className="symbol-popover-preview">{def.preview}</code>
+          </button>
+        ))}
+      </div>
+    </div>
+  )
+}
 type FileReviewNote = {
   id: number
   path: string
@@ -3918,6 +4291,11 @@ type FileAnnotationMeta =
 function FilesView({
   location,
   onLocation,
+  onSymbolLookup,
+  canGoBack,
+  canGoForward,
+  onGoBack,
+  onGoForward,
   review,
   mode,
   onModeChange,
@@ -3930,6 +4308,11 @@ function FilesView({
 }: {
   location: FileReviewLocation | null
   onLocation: (location: FileReviewLocation) => void
+  onSymbolLookup: (req: SymbolLookupRequest) => void
+  canGoBack: boolean
+  canGoForward: boolean
+  onGoBack: () => void
+  onGoForward: () => void
   review: FileReviewNotes
   mode: ReviewMode
   onModeChange: (mode: ReviewMode) => void
@@ -4172,7 +4555,16 @@ function FilesView({
       }),
     )
     return () => cancelAnimationFrame(tick)
-  }, [fileId, location?.line, lineCount])
+  }, [fileId, location, lineCount])
+
+  useSymbolNavigation({
+    active: true,
+    enabled: !!path,
+    paneRef,
+    fileForHost: () => path ?? null,
+    originForHit: (filePath, lineNum) => ({ mode: 'files', path: filePath, line: lineNum }),
+    onSymbolLookup,
+  })
 
   const save = useCallback(
     (text: string, choices?: OrcaChoice[], send = false) => {
@@ -4414,6 +4806,10 @@ function FilesView({
           onToggleTree={toggleTree}
           mode={mode}
           onModeChange={onModeChange}
+          canGoBack={canGoBack}
+          canGoForward={canGoForward}
+          onGoBack={onGoBack}
+          onGoForward={onGoForward}
           command={diffData?.revset || diffData?.repo}
           resolvedTheme={resolvedTheme}
           onToggleTheme={onToggleTheme}
@@ -4608,12 +5004,29 @@ function FilesView({
   )
 }
 
+function sameNavEntry(a: NavEntry | undefined, b: NavEntry): boolean {
+  if (!a || a.mode !== b.mode) return false
+  if (a.mode === 'diff' && b.mode === 'diff') return a.file === b.file
+  if (a.mode === 'files' && b.mode === 'files')
+    return a.path === b.path && a.line === b.line
+  return false
+}
+
 function ReviewWorkspace() {
   const [mode, setMode] = useState<ReviewMode>('diff')
   const [location, setLocation] = useState<FileReviewLocation | null>(null)
   const [diffJump, setDiffJump] = useState<{ path: string; seq: number } | null>(null)
   const jumpSeqRef = useRef(0)
   const [showHelp, setShowHelp] = useState(false)
+  const [popover, setPopover] = useState<SymbolPopoverState | null>(null)
+  const [navHistory, setNavHistory] = useState<{ entries: NavEntry[]; index: number }>({
+    entries: [],
+    index: -1,
+  })
+  const navHistoryRef = useRef(navHistory)
+  navHistoryRef.current = navHistory
+  const lookupSeqRef = useRef(0)
+  const { toast: symbolToast, showToast: showSymbolToast } = useToast(2200)
   const diffPaneRef = useRef<HTMLDivElement>(null)
   const review = useFileReviewNotes()
   const { theme, resolvedTheme, toggleTheme } = useAppTheme()
@@ -4622,15 +5035,156 @@ function ReviewWorkspace() {
     queryFn: () => apiFetch<DiffResponse>('api/diff'),
     enabled: false,
   })
+
+  const applyNavEntry = useCallback((entry: NavEntry) => {
+    setPopover(null)
+    if (entry.mode === 'diff') {
+      setMode('diff')
+    } else {
+      setLocation({ path: entry.path, line: entry.line })
+      setMode('files')
+    }
+  }, [])
+
+  const recordAndJump = useCallback(
+    (origin: NavEntry, target: { path: string; line: number }) => {
+      const dest: NavEntry = { mode: 'files', path: target.path, line: target.line }
+      setNavHistory((prev) => {
+        const base = prev.index >= 0 ? prev.entries.slice(0, prev.index + 1) : []
+        const tip = base.at(-1)
+        const withOrigin = sameNavEntry(tip, origin)
+          ? base
+          : tip?.mode === 'files' && origin.mode === 'files' && tip.path === origin.path
+            ? [...base.slice(0, -1), origin]
+            : [...base, origin]
+        const next = [...withOrigin, dest]
+        const trimmed = next.length > 50 ? next.slice(next.length - 50) : next
+        return { entries: trimmed, index: trimmed.length - 1 }
+      })
+      setPopover(null)
+      setLocation({ path: target.path, line: target.line })
+      setMode('files')
+    },
+    [],
+  )
+
+  const canGoBack = navHistory.index > 0
+  const canGoForward =
+    navHistory.index >= 0 && navHistory.index < navHistory.entries.length - 1
+
+  const goBack = useCallback(() => {
+    const { entries, index } = navHistoryRef.current
+    if (index <= 0) return
+    const nextIndex = index - 1
+    setNavHistory({ entries, index: nextIndex })
+    applyNavEntry(entries[nextIndex]!)
+  }, [applyNavEntry])
+
+  const goForward = useCallback(() => {
+    const { entries, index } = navHistoryRef.current
+    if (index < 0 || index >= entries.length - 1) return
+    const nextIndex = index + 1
+    setNavHistory({ entries, index: nextIndex })
+    applyNavEntry(entries[nextIndex]!)
+  }, [applyNavEntry])
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (!e.altKey || e.metaKey || e.ctrlKey || e.shiftKey) return
+      const origin = e.composedPath()[0]
+      if (origin instanceof HTMLTextAreaElement || origin instanceof HTMLInputElement)
+        return
+      if (e.key === 'ArrowLeft') {
+        if (navHistoryRef.current.index > 0) {
+          e.preventDefault()
+          goBack()
+        }
+      } else if (e.key === 'ArrowRight') {
+        const cur = navHistoryRef.current
+        if (cur.index >= 0 && cur.index < cur.entries.length - 1) {
+          e.preventDefault()
+          goForward()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [goBack, goForward])
+
+  const handleSymbolLookup = useCallback(
+    (req: SymbolLookupRequest) => {
+      const seq = ++lookupSeqRef.current
+      const params = new URLSearchParams({
+        symbol: req.symbol,
+        fromFile: req.fromFile,
+        line: String(req.line),
+        isCall: req.isCall ? '1' : '0',
+      })
+      if (req.receiver) params.set('receiver', req.receiver)
+      void apiFetch<SymbolDefinitionsResponse>(`api/symbol-definitions?${params}`).then(
+        (res) => {
+          if (seq !== lookupSeqRef.current) return
+          if (res.definitions.length === 0) {
+            setPopover(null)
+            showSymbolToast(
+              <>
+                No definition found for <code>{req.symbol}</code> in repository
+              </>,
+            )
+            return
+          }
+          if (res.definitions.length === 1) {
+            const only = res.definitions[0]!
+            if (
+              req.origin.mode === 'files' &&
+              req.origin.path === only.path &&
+              req.origin.line === only.line
+            ) {
+              setPopover(null)
+              showSymbolToast(
+                <>
+                  Already at definition of <code>{req.symbol}</code>
+                </>,
+              )
+              return
+            }
+            recordAndJump(req.origin, { path: only.path, line: only.line })
+            return
+          }
+          setPopover({
+            symbol: req.symbol,
+            origin: req.origin,
+            definitions: res.definitions,
+            truncated: res.truncated,
+            anchor: req.anchor,
+          })
+        },
+        (error: unknown) => {
+          if (seq !== lookupSeqRef.current) return
+          showSymbolToast(
+            error instanceof Error ? error.message : `Could not look up ${req.symbol}`,
+          )
+        },
+      )
+    },
+    [recordAndJump, showSymbolToast],
+  )
+
   const openFile = useCallback((path: string, line?: number) => {
+    setPopover(null)
     setLocation({ path, line })
     setMode('files')
   }, [])
   const jumpToDiff = useCallback((path: string) => {
+    setPopover(null)
     setDiffJump({ path, seq: ++jumpSeqRef.current })
     setMode('diff')
   }, [])
   const clearDiffJump = useCallback(() => setDiffJump(null), [])
+  const handleModeChange = useCallback((next: ReviewMode) => {
+    setPopover(null)
+    setMode(next)
+  }, [])
   return (
     <>
       <div className="workspace-pane" ref={diffPaneRef} hidden={mode !== 'diff'}>
@@ -4638,8 +5192,13 @@ function ReviewWorkspace() {
           active={mode === 'diff'}
           paneRef={diffPaneRef}
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={handleModeChange}
           onOpenFile={openFile}
+          onSymbolLookup={handleSymbolLookup}
+          canGoBack={canGoBack}
+          canGoForward={canGoForward}
+          onGoBack={goBack}
+          onGoForward={goForward}
           theme={theme}
           resolvedTheme={resolvedTheme}
           onToggleTheme={toggleTheme}
@@ -4653,9 +5212,14 @@ function ReviewWorkspace() {
         <FilesView
           location={location}
           onLocation={setLocation}
+          onSymbolLookup={handleSymbolLookup}
+          canGoBack={canGoBack}
+          canGoForward={canGoForward}
+          onGoBack={goBack}
+          onGoForward={goForward}
           review={review}
           mode={mode}
-          onModeChange={setMode}
+          onModeChange={handleModeChange}
           onJumpToDiff={jumpToDiff}
           theme={theme}
           resolvedTheme={resolvedTheme}
@@ -4663,6 +5227,26 @@ function ReviewWorkspace() {
           showHelp={showHelp}
           onShowHelp={setShowHelp}
         />
+      )}
+      {popover && (
+        <SymbolPopover
+          key={`${popover.symbol}:${popover.anchor.x}:${popover.anchor.y}`}
+          popover={popover}
+          onSelect={(def) =>
+            recordAndJump(popover.origin, { path: def.path, line: def.line })
+          }
+          onClose={() => setPopover(null)}
+        />
+      )}
+      {symbolToast && (
+        <div
+          className="toast symbol-toast"
+          role="status"
+          key={symbolToast.key}
+          style={{ animationDuration: `${symbolToast.ms}ms` }}
+        >
+          {symbolToast.content}
+        </div>
       )}
       {showHelp && (
         <HelpModal send={diffData?.send ?? false} onClose={() => setShowHelp(false)} />

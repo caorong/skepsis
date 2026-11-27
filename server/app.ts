@@ -14,6 +14,7 @@ import { basename, join } from 'node:path'
 import type { DiffArgs } from '../shared/types.ts'
 import { repoRoot } from './diffSource.ts'
 import { createRepositoryFiles, sourceLines } from './repositoryFiles.ts'
+import { resolveSymbolDefinitions } from './symbolDefinition.ts'
 import { getDiff, patchHash } from './diff.ts'
 import { displayCommand } from './displayCommand.ts'
 import { getFileContents } from './fileContents.ts'
@@ -36,6 +37,7 @@ import {
   orcaRequestSchema,
   repositoryReviewSchema,
   fileContentsQuerySchema,
+  symbolDefinitionsQuerySchema,
   themeRequestSchema,
   DEFAULT_TAB_SIZE,
   TOKEN_HEADER,
@@ -306,6 +308,25 @@ export async function buildApp(opts: BuildOptions): Promise<App> {
         throw new HTTPException(400, { message: 'Choose a file.' })
       return c.json(await repository().read(file))
     })
+    app.get(
+      '/api/symbol-definitions',
+      zValidator('query', symbolDefinitionsQuerySchema),
+      async (c) => {
+        const { symbol, fromFile, receiver, isCall, line } = c.req.valid('query')
+        return c.json(
+          await resolveSymbolDefinitions({
+            root: repository().root,
+            symbol,
+            fromFile,
+            receiver,
+            isCall: isCall === '1',
+            line,
+            paths: repository().paths,
+            read: repository().read,
+          }),
+        )
+      },
+    )
     if (send || (orca && guard)) {
       app.post(
         '/api/repository-review',

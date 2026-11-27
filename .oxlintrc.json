@@ -51,5 +51,5 @@
     "react/memo-dependencies": "off",
     "react/exhaustive-effect-dependencies": "off"
   },
-  "ignorePatterns": ["dist/", "node_modules/"]
+  "ignorePatterns": ["dist/", "node_modules/", "orca-plugin/dist/", "orca-plugin/.orca/"]
 }

@@ -129,6 +129,39 @@ export const fileContentsQuerySchema = z.object({
   oldPath: z.string().optional(),
 })
 
+export const symbolDefinitionsQuerySchema = z.object({
+  symbol: z.string().regex(/^[A-Za-z_$][A-Za-z0-9_$]{0,199}$/),
+  fromFile: z.string().max(4096).optional(),
+  receiver: z
+    .string()
+    .regex(/^[A-Za-z_$][A-Za-z0-9_$]{0,199}$/)
+    .optional(),
+  isCall: z.enum(['0', '1']).optional(),
+  line: z.coerce.number().int().positive().optional(),
+})
+
+export type SymbolDefinitionKind =
+  | 'type'
+  | 'method'
+  | 'function'
+  | 'field'
+  | 'const'
+  | 'symbol'
+
+export interface SymbolDefinition {
+  path: string
+  line: number
+  preview: string
+  kind: SymbolDefinitionKind
+  reason?: string
+}
+
+export interface SymbolDefinitionsResponse {
+  symbol: string
+  definitions: SymbolDefinition[]
+  truncated: boolean
+}
+
 // --- Request types (inferred from schemas) ---
 
 export type ViewedRequest = z.infer<typeof viewedRequestSchema>

@@ -2,5 +2,5 @@
   "printWidth": 92,
   "singleQuote": true,
   "semi": false,
-  "ignorePatterns": ["dist/**"]
+  "ignorePatterns": ["dist/**", "orca-plugin/dist/**", "orca-plugin/.orca/**"]
 }
