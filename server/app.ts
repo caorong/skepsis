@@ -22,6 +22,7 @@ import { getCommentSyntaxes } from './commentSyntax.ts'
 import { loadTheme, saveTheme, themeBootScript } from './settings.ts'
 import { newToken, sendGate, tokenMatches } from './gate.ts'
 import { buildPayload } from './send.ts'
+import type { OrcaBridge } from './orca.ts'
 import type { SendPayload, SendResult } from './send.ts'
 import {
   viewedRequestSchema,
@@ -30,6 +31,7 @@ import {
   commentRequestSchema,
   commentDeleteSchema,
   sendRequestSchema,
+  orcaRequestSchema,
   fileContentsQuerySchema,
   themeRequestSchema,
   DEFAULT_TAB_SIZE,
@@ -53,6 +55,7 @@ export interface BuildOptions {
   /** Delivers a comment the page sends. Unset, /api/send doesn't exist and
    *  the page has no Send button. */
   send?: ((payload: SendPayload) => Promise<SendResult>) | null
+  orca?: OrcaBridge
   /** Default true: API requests need the per-run token, and /api/send needs
    *  a loopback Host and a matching Origin. False when a host application
    *  checks requests before they get here */
@@ -72,7 +75,7 @@ export interface App {
 /** The page and its API for one diff. Runs the diff once and rejects if it
  *  fails. */
 export async function buildApp(opts: BuildOptions): Promise<App> {
-  const { diffSource, cwd, poll = true, send, guard = true } = opts
+  const { diffSource, cwd, poll = true, send, orca, guard = true } = opts
   const { tabSize = DEFAULT_TAB_SIZE } = opts
   // The paths in the latest diff, including the old names of renames. A
   // request's path is joined onto the repo directory, so the routes that read
@@ -144,7 +147,8 @@ export async function buildApp(opts: BuildOptions): Promise<App> {
       fileHashes,
       patchHash: patchHash(patch),
       poll,
-      send: !!send,
+      send: !!send || !!orca,
+      ...(orca ? { orca: true } : {}),
       tabSize,
       viewed,
       commentSyntaxes,
@@ -237,6 +241,35 @@ export async function buildApp(opts: BuildOptions): Promise<App> {
         return c.json({ ok: true } satisfies OkResponse)
       },
     )
+  }
+
+  if (orca && guard) {
+    app.use('/api/orca/*', async (c, next) => {
+      if (!sendGate({ host: c.req.header('host'), origin: c.req.header('origin') }))
+        return c.json({ error: 'forbidden' } satisfies ErrorResponse, 403)
+      await next()
+    })
+    app.get('/api/orca/targets', async (c) => {
+      try {
+        return c.json(await orca.targets())
+      } catch (error) {
+        return c.json({ error: (error as Error).message } satisfies ErrorResponse, 502)
+      }
+    })
+    app.post('/api/orca/send', zValidator('json', orcaRequestSchema), async (c) => {
+      const { target, ...input } = c.req.valid('json')
+      if (!input.file || !input.lines || !input.side)
+        return c.json(
+          { error: 'Select lines in the diff first.' } satisfies ErrorResponse,
+          400,
+        )
+      await requireInDiff(input.file)
+      try {
+        return c.json(await orca.deliver(target, buildPayload(diffSource, cwd, input)))
+      } catch (error) {
+        return c.json({ error: (error as Error).message } satisfies ErrorResponse, 502)
+      }
+    })
   }
 
   app.delete('/api/comment', zValidator('json', commentDeleteSchema), async (c) => {

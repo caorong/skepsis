@@ -77,6 +77,7 @@ const program = new Command()
       'add a Send button that pipes the comment to this shell command',
     ).env('SKEPSIS_SEND'),
   )
+  .option('--orca', 'send review comments to agents in this local Orca workspace')
   .argument('[files...]', 'Limit diff to these paths (passed through to jj/git)')
   .addHelpText(
     'after',
@@ -104,6 +105,10 @@ const hostname = opts.host
 // off.
 const openCmd = opts.openCmd || null
 const send = opts.send || null
+if (opts.orca && send) fail('Choose either --orca or --send, not both.')
+if (opts.orca && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname)) {
+  fail('--orca requires a loopback --host (localhost, 127.0.0.1 or ::1).')
+}
 if (send && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname)) {
   fail(
     `--send runs a command on request from the page, so it needs a loopback\n` +
@@ -171,6 +176,7 @@ const { port: apiPort, token } = await startServer({
   port: opts.dev ? undefined : opts.port,
   poll: opts.poll,
   send,
+  orca: opts.orca,
   tabSize: opts.tabSize,
 }).catch((err: Error) => {
   console.error(err.message)

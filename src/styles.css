@@ -1342,3 +1342,34 @@ body,
     font-size: 16px;
   }
 }
+
+.orca-picker {
+  display: grid;
+  gap: 4px;
+  padding: 4px 10px;
+}
+
+.orca-picker-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.orca-choices {
+  display: grid;
+  gap: 3px;
+  max-height: 128px;
+  overflow: auto;
+  min-width: 0;
+  padding: 2px 8px 5px;
+  border: 1px solid currentColor;
+  border-radius: 4px;
+}
+
+.orca-choices label {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  overflow-wrap: anywhere;
+}

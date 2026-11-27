@@ -9,17 +9,21 @@
 import { serve } from '@hono/node-server'
 import { buildApp } from './app.ts'
 import type { BuildOptions } from './app.ts'
+import { LOOPBACK } from './gate.ts'
+import { createOrcaBridge } from './orca.ts'
+import { repoRoot } from './diffSource.ts'
 import { displayCommand } from './displayCommand.ts'
 import { runSend } from './send.ts'
 import type { SendPayload } from './send.ts'
 
 /** The CLI's server: the app on its own port, with the guard on */
 export async function startServer(
-  opts: Omit<BuildOptions, 'guard' | 'send'> & {
+  opts: Omit<BuildOptions, 'guard' | 'send' | 'orca'> & {
     port?: number
     hostname?: string
     /** The --send command. Unset, /api/send doesn't exist. */
     send?: string | null
+    orca?: boolean
   },
 ): Promise<{ port: number; token: string; close: () => void }> {
   const { port = 0, hostname = 'localhost', cwd, send: command } = opts
@@ -31,7 +35,10 @@ export async function startServer(
         return runSend(command, payload, { cwd, env })
       }
     : null
-  const app = await buildApp({ ...opts, send })
+  if (opts.orca && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname))
+    throw new Error('--orca requires a loopback host')
+  const orca = opts.orca ? createOrcaBridge(repoRoot(cwd, opts.diffSource.vcs)) : undefined
+  const app = await buildApp({ ...opts, send, orca })
   const token = app.token!
 
   return new Promise((resolve, reject) => {

@@ -70,6 +70,22 @@ export const sendRequestSchema = z.object({
   text: z.string().min(1),
 })
 
+export const orcaRequestSchema = sendRequestSchema.extend({
+  target: z.object({
+    kind: z.enum(['existing', 'new']),
+    id: z.string().min(1).max(256),
+  }),
+})
+
+export type OrcaTarget = z.infer<typeof orcaRequestSchema>['target']
+
+export interface OrcaTargetsResponse {
+  workspace: string
+  existing: { id: string; label: string }[]
+  fresh: { id: string; label: string }[]
+  truncated: boolean
+}
+
 export const commentDeleteSchema = z.object({
   file: z.string(),
   line: z.number(),
@@ -161,6 +177,8 @@ export interface DiffResponse {
   poll: boolean
   /** Whether --send is set, so the comment box can send */
   send: boolean
+  /** The CLI opted in to local Orca integration. */
+  orca?: boolean
   /** Tab width in columns, from --tab-size or SKEPSIS_TAB_SIZE */
   tabSize: number
   viewed: ViewedMap
