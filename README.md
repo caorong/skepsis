@@ -290,20 +290,50 @@ isn't the page's own.
 
 ## Send review comments to Orca
 
-Open your checkout as a workspace in the local Orca desktop app and install its
-`orca` CLI. Use Orca v1.4.277 or later for the CLI commands used here. From this
-fork's checkout, build once:
+### Quick start with npx
+
+Use Node.js 22 or later and Orca v1.4.277 or later. Open the checkout you want
+to review as a local Orca workspace. If `command -v orca` finds nothing,
+register the CLI in Orca under **Settings → General → Orca CLI**.
+
+From the **checkout you want to review**, run:
 
 ```sh
-npm ci
-npm run build
+npx --yes --package='git+https://github.com/caorong/skepsis.git#main' -- skepsis --orca
 ```
 
-Then, from the **checkout you want to review**, run:
+This downloads and builds this fork on first use; there is no manual clone or
+npm registry publish step. `--orca` is a Skepsis runtime option, not an install
+option. It enables the Orca agent picker for this run. Omit it to use ordinary
+local review without connecting to Orca.
+
+### Updates and other ways to run
+
+An already-open Skepsis instance does not update while it runs. On a later
+launch, npm can reuse the cached build for the same Git commit. To explicitly
+use the latest commit on GitHub's `main`, resolve the commit first:
 
 ```sh
-node /path/to/skepsis/dist/cli.js --orca
+sha=$(git ls-remote https://github.com/caorong/skepsis.git refs/heads/main | awk '{print $1}')
+[ -n "$sha" ] && npx --yes --package="git+https://github.com/caorong/skepsis.git#$sha" -- skepsis --orca
 ```
+
+For a persistent command, install the fork globally, then run
+`skepsis --orca` from the checkout you want to review:
+
+```sh
+npm install -g 'git+https://github.com/caorong/skepsis.git#main'
+```
+
+A global installation does not update on launch. Re-run the install command to
+update it. If you already have the upstream Skepsis installed globally, prefer
+`npx` for this fork so the two versions do not share the global command name.
+
+To build from source, run `npm ci && npm run build` in this fork's checkout.
+Then run `node /path/to/skepsis/dist/cli.js --orca` from the checkout you want
+to review.
+
+### Sending a comment
 
 Click a diff line (or select a range) to write a comment. In **Existing agents**,
 select a specific Orca session to keep its context. In **Start a new agent**,
