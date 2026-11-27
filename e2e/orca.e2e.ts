@@ -128,12 +128,15 @@ test('routes line comments to existing and new Orca agents without blocking anot
 }) => {
   await clickLine(page, 0)
   await expect(page.getByText('Orca · Review workspace')).toBeVisible()
-  await expect(
-    page.locator('.orca-chip .orca-chip-title', { hasText: 'Existing Codex' }),
-  ).toBeVisible()
-  await expect(
-    page.locator('.orca-chip .orca-chip-meta', { hasText: 'codex · working' }),
-  ).toBeVisible()
+  // Existing agents render in a vertical list sorted by agent type with the type badge first.
+  await expect(page.locator('.orca-list .orca-agent-badge')).toHaveText([
+    'antigravity',
+    'codex',
+  ])
+  await expect(page.locator('.orca-list .orca-row-title')).toHaveText([
+    'Existing Agy',
+    'Existing Codex',
+  ])
   await expect(page.getByText('Other worktree')).toHaveCount(0)
   await expect(page.getByText('Other host')).toHaveCount(0)
   await expect(page.getByText('Sleeping agent')).toHaveCount(0)

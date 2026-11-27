@@ -832,25 +832,73 @@ function OrcaChoiceGroup({
   empty,
   selected,
   onChange,
+  layout = 'chips',
 }: {
   title: string
   items: OrcaChoice[]
   empty: string
   selected: string[]
   onChange: (values: string[]) => void
+  layout?: 'list' | 'chips'
 }) {
   return (
     <fieldset className="orca-group">
       <legend className="orca-group-title">{title}</legend>
       {items.length === 0 ? (
         <span className="orca-empty">{empty}</span>
+      ) : layout === 'list' ? (
+        <div className="orca-list">
+          {items.map((item) => {
+            const key = orcaChoiceKey(item)
+            const checked = selected.includes(key)
+            const disabled = !checked && selected.length >= 8
+            return (
+              <label
+                key={key}
+                className={
+                  'orca-row' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '')
+                }
+                title={item.label}
+              >
+                <input
+                  type="checkbox"
+                  className="orca-chip-checkbox"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? [...selected, key]
+                        : selected.filter((value) => value !== key),
+                    )
+                  }
+                />
+                {item.agent && (
+                  <span className="orca-agent-badge" data-agent={item.agent.toLowerCase()}>
+                    {item.agent}
+                  </span>
+                )}
+                <span className="orca-row-title">{item.title ?? item.label}</span>
+                {item.state && (
+                  <span className="orca-row-state">
+                    <span
+                      className="orca-state-dot"
+                      data-state={item.state}
+                      aria-hidden="true"
+                    />
+                    {item.state}
+                  </span>
+                )}
+              </label>
+            )
+          })}
+        </div>
       ) : (
         <div className="orca-chips">
           {items.map((item) => {
             const key = orcaChoiceKey(item)
             const checked = selected.includes(key)
             const disabled = !checked && selected.length >= 8
-            const meta = [item.agent, item.state].filter(Boolean).join(' · ')
             return (
               <label
                 key={key}
@@ -872,26 +920,12 @@ function OrcaChoiceGroup({
                     )
                   }
                 />
-                {item.kind === 'existing' && item.title ? (
-                  <>
-                    <span
-                      className="orca-state-dot"
-                      data-state={item.state ?? 'unknown'}
-                      aria-hidden="true"
-                    />
-                    <span className="orca-chip-title">{item.title}</span>
-                    {meta && <span className="orca-chip-meta">{meta}</span>}
-                  </>
-                ) : (
-                  <>
-                    {item.kind === 'new' && (
-                      <span className="orca-chip-plus" aria-hidden="true">
-                        +
-                      </span>
-                    )}
-                    <span className="orca-chip-title">{item.label}</span>
-                  </>
+                {item.kind === 'new' && (
+                  <span className="orca-chip-plus" aria-hidden="true">
+                    +
+                  </span>
                 )}
+                <span className="orca-chip-title">{item.label}</span>
               </label>
             )
           })}
@@ -948,15 +982,19 @@ function CommentForm({
     retry: false,
     refetchOnWindowFocus: false,
   })
-  const existing: OrcaChoice[] = (orca.data?.existing ?? []).map((row) => ({
-    id: row.id,
-    label: row.label,
-    title: row.title,
-    agent: row.agent,
-    sessionKind: row.kind,
-    state: row.state,
-    kind: 'existing',
-  }))
+  const existing: OrcaChoice[] = (orca.data?.existing ?? [])
+    .map((row) => ({
+      id: row.id,
+      label: row.label,
+      title: row.title,
+      agent: row.agent,
+      sessionKind: row.kind,
+      state: row.state,
+      kind: 'existing' as const,
+    }))
+    .toSorted((a, b) =>
+      (a.agent ?? '').localeCompare(b.agent ?? '', undefined, { sensitivity: 'base' }),
+    )
   const fresh: OrcaChoice[] = (orca.data?.fresh ?? []).map((row) => ({
     id: row.id,
     label: row.label,
@@ -1050,6 +1088,7 @@ function CommentForm({
                 empty="No open agents in this worktree."
                 selected={selected}
                 onChange={setSelected}
+                layout="list"
               />
               <OrcaChoiceGroup
                 title="Start a new agent"
