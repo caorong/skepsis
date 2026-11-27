@@ -24,6 +24,8 @@ export interface SendPayload {
     /** Whether the diff ends at the working copy */
     toWorkingCopy: boolean
   }
+  /** Present when the comment is anchored to a full working-tree file, not a diff. */
+  scope?: 'working-tree'
   file: string | null
   side: 'additions' | 'deletions' | null
   /** 1-based and inclusive, in `side`'s numbering */
@@ -110,7 +112,8 @@ export function renderPrompt(p: Omit<SendPayload, 'prompt'>): string {
       ? `, line ${p.lines[0]}`
       : `, lines ${p.lines[0]}–${p.lines[1]}`
   const side = p.side === 'deletions' ? 'old side' : 'new side'
-  const head = `Review comment on ${p.file}${where} (${side} of ${command})`
+  const origin = p.scope === 'working-tree' ? 'working tree' : `${side} of ${command}`
+  const head = `Review comment on ${p.file}${where} (${origin})`
   if (!p.code) return `${head}:\n\n${p.text}`
   const ranges = p.code.map(({ lines: [first, last] }) =>
     first === last ? `line ${first}` : `lines ${first}–${last}`,

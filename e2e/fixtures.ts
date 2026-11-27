@@ -6,9 +6,9 @@
  * Copyright Oxide Computer Company
  */
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { test as base, type Page } from '@playwright/test'
 import { clearSkepsisEnv, exec, startCli } from '../server/testUtil.ts'
 
@@ -56,7 +56,11 @@ export const WORKING: Record<string, string> = {
 
 const writeFiles = (dir: string, files: Record<string, string>) =>
   Promise.all(
-    Object.entries(files).map(([name, contents]) => writeFile(join(dir, name), contents)),
+    Object.entries(files).map(async ([name, contents]) => {
+      const path = join(dir, name)
+      await mkdir(dirname(path), { recursive: true })
+      await writeFile(path, contents)
+    }),
   )
 
 /** What the temp repo holds: `committed` in its one commit, `working` written

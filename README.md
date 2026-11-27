@@ -288,6 +288,23 @@ isn't the page's own.
 
 </details>
 
+## Review complete files
+
+When running the CLI locally, switch from **Diff** to **Files** to browse and
+search the full working-tree
+file hierarchy, including unchanged files. From a changed file's diff header,
+**Open full file** switches to Files and scrolls near the change when the diff
+ends at the working copy. Files works even when the diff is empty.
+
+Click the gutter **+** on a line, or select a line range, to leave a note. A
+local note stays in the browser tab and does not edit the file. With
+`--orca`, the same composer can send the selected source lines to agents.
+**Refresh file** refreshes the current snapshot if the file changes on disk.
+
+The tree shows tracked files and unignored untracked files for Git worktrees.
+Only regular UTF-8 text files up to 1 MiB can be opened; binary files and
+symlinks are not previewed.
+
 ## Send review comments to Orca
 
 Open your checkout as a workspace in the local Orca desktop app and install its

@@ -18,7 +18,7 @@ import type { SendPayload } from './send.ts'
 
 /** The CLI's server: the app on its own port, with the guard on */
 export async function startServer(
-  opts: Omit<BuildOptions, 'guard' | 'send' | 'orca'> & {
+  opts: Omit<BuildOptions, 'guard' | 'send' | 'orca' | 'repositoryBrowser'> & {
     port?: number
     hostname?: string
     /** The --send command. Unset, /api/send doesn't exist. */
@@ -38,7 +38,12 @@ export async function startServer(
   if (opts.orca && !LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname))
     throw new Error('--orca requires a loopback host')
   const orca = opts.orca ? createOrcaBridge(repoRoot(cwd, opts.diffSource.vcs)) : undefined
-  const app = await buildApp({ ...opts, send, orca })
+  const app = await buildApp({
+    ...opts,
+    send,
+    orca,
+    repositoryBrowser: LOOPBACK.has(hostname === '::1' ? '[::1]' : hostname),
+  })
   const token = app.token!
 
   return new Promise((resolve, reject) => {

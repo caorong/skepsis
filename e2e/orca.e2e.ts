@@ -205,3 +205,28 @@ test('rejects another origin and an out-of-worktree agent without running a muta
   })
   expect(await commands(review.dir)).toEqual([])
 })
+
+test('sends an unchanged whole-file line to an existing Orca session', async ({
+  page,
+  review,
+}) => {
+  await page.getByRole('button', { name: 'Files', exact: true }).click()
+  await page.getByRole('treeitem', { name: 'long.ts' }).click()
+  const line = page.locator('.repo-codeview [data-column-number="4"]').first()
+  await expect(async () => {
+    await line.hover()
+    await line.locator('[data-gutter-utility-slot]').click({ timeout: 1000 })
+  }).toPass()
+  await page.getByRole('checkbox', { name: /Existing Codex/ }).check()
+  await composer(page).fill('What happens on this unchanged line?')
+  await writeFile(join(review.dir, '.git', 'release'), '')
+  await page.getByRole('button', { name: 'Send to Orca', exact: true }).click()
+  await expect(page.getByText(/Accepted by Orca · Existing Codex/)).toBeVisible()
+  const log = await commands(review.dir)
+  const cmd = log.find((row) => row[1] === 'send')!
+  expect(cmd[cmd.indexOf('--to') + 1]).toBe('orca_session_id:codex-session')
+  expect(cmd[cmd.indexOf('--body') + 1]).toContain(
+    'Review comment on long.ts, line 4 (working tree)',
+  )
+  expect(await readFile(join(review.dir, 'long.ts'), 'utf8')).toBe(COMMITTED['long.ts'])
+})

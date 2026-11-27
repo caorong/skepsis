@@ -86,6 +86,29 @@ export interface OrcaTargetsResponse {
   truncated: boolean
 }
 
+export interface RepositoryFile {
+  path: string
+  contents: string
+  revision: string
+}
+
+export interface RepositoryFilesResponse {
+  paths: string[]
+  send: boolean
+  orca: boolean
+  tabSize: number
+}
+
+export const repositoryReviewSchema = z.object({
+  path: z.string().min(1).max(4096),
+  revision: z.string().regex(/^[a-f0-9]{64}$/),
+  lines: z.tuple([z.number().int().positive(), z.number().int().positive()]),
+  text: z.string().trim().min(1).max(8000),
+  target: orcaRequestSchema.shape.target.optional(),
+})
+
+export type RepositoryReview = z.infer<typeof repositoryReviewSchema>
+
 export const commentDeleteSchema = z.object({
   file: z.string(),
   line: z.number(),
@@ -179,6 +202,7 @@ export interface DiffResponse {
   send: boolean
   /** The CLI opted in to local Orca integration. */
   orca?: boolean
+  repositoryBrowser?: boolean
   /** Tab width in columns, from --tab-size or SKEPSIS_TAB_SIZE */
   tabSize: number
   viewed: ViewedMap

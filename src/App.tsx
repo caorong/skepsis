@@ -37,6 +37,7 @@ import type { GitStatus, GitStatusEntry } from '@pierre/trees'
 import DiffsHighlightWorker from '@pierre/diffs/worker/worker.js?worker'
 import type {
   CodeViewDiffItem,
+  CodeViewFileItem,
   CodeViewItem,
   CodeViewOptions,
   DiffLineAnnotation,
@@ -54,6 +55,9 @@ import type {
   SendRequest,
   OrcaTarget,
   OrcaTargetsResponse,
+  RepositoryFile,
+  RepositoryFilesResponse,
+  RepositoryReview,
   ErrorResponse,
   FileContentsResponse,
   ThemeMode,
@@ -861,6 +865,7 @@ function CommentForm({
   submitting,
   error,
   syntax,
+  localNote = false,
 }: {
   /** The text ⌘C copies while the box is empty: the selection that opened
    *  the box, which focusing the box took away */
@@ -883,6 +888,7 @@ function CommentForm({
   /** Comment syntax the inserted tags will use. Empty prefix: the format has
    *  no comment syntax; null: unrecognized file type. Both insert bare. */
   syntax: FileCommentSyntax
+  localNote?: boolean
 }) {
   const [text, setText] = useState(initialText)
   const [selected, setSelected] = useState<string[]>([])
@@ -998,7 +1004,9 @@ function CommentForm({
         <div className="comment-form-note">
           {/* The marker only matters to an inline comment, so where there
               can't be one, the note says why instead. */}
-          {inlineUnavailable ? (
+          {localNote ? (
+            'Notes stay in this browser tab and do not edit the file.'
+          ) : inlineUnavailable ? (
             inlineUnavailable
           ) : syntax === null ? (
             <>Comment marker: none (file type not recognized)</>
@@ -1030,9 +1038,13 @@ function CommentForm({
               <Button
                 disabled={!text.trim() || submitting || !inline}
                 onClick={() => run(inline)}
-                title={`Write the comment into the file as a review marker (${INLINE_KEYS})`}
+                title={
+                  localNote
+                    ? `Save a note without changing the file (${INLINE_KEYS})`
+                    : `Write the comment into the file as a review marker (${INLINE_KEYS})`
+                }
               >
-                Comment
+                {localNote ? 'Save note' : 'Comment'}
               </Button>
               <Button
                 variant="primary"
@@ -1057,7 +1069,7 @@ function CommentForm({
               disabled={!text.trim() || submitting}
               onClick={() => run(onSubmit)}
             >
-              Comment
+              {localNote ? 'Save note' : 'Comment'}
             </Button>
           )}
         </div>
@@ -1186,6 +1198,7 @@ function FileHeader({
   onToggleCollapse,
   onToggleViewed,
   onToggleExpand,
+  onOpenFile,
 }: {
   fileDiff: FileDiffMetadata
   isViewed: boolean
@@ -1200,6 +1213,7 @@ function FileHeader({
   onToggleCollapse: () => void
   onToggleViewed: () => void
   onToggleExpand: () => void
+  onOpenFile?: () => void
 }) {
   const { additions, deletions } = getFileStats(fileDiff)
   const [copied, setCopied] = useState(false)
@@ -1283,6 +1297,18 @@ function FileHeader({
           </button>
         </Tip>
       )}
+      {onOpenFile && (
+        <button
+          type="button"
+          className="btn btn-secondary open-full-file"
+          onClick={(e) => {
+            e.stopPropagation()
+            onOpenFile()
+          }}
+        >
+          Open full file
+        </button>
+      )}
       <LineCounts
         className="file-header-stats"
         additions={additions}
@@ -1336,6 +1362,7 @@ function FileTreePanel({
   viewed,
   focusedFile,
   onSelectFile,
+  startCollapsed = false,
 }: {
   paths: string[]
   gitStatus: GitStatusEntry[]
@@ -1343,6 +1370,7 @@ function FileTreePanel({
   viewed: ReadonlySet<string>
   focusedFile: string | null
   onSelectFile: (path: string) => void
+  startCollapsed?: boolean
 }) {
   // The listener fires synchronously for programmatic selection too; this
   // marks those so mirroring the focused file into the tree doesn't scroll
@@ -1356,7 +1384,7 @@ function FileTreePanel({
   const { model } = useFileTree({
     preparedInput,
     gitStatus,
-    initialExpansion: 'open',
+    initialExpansion: startCollapsed ? 'closed' : 'open',
     flattenEmptyDirectories: true,
     stickyFolders: true,
     search: true,
@@ -1439,6 +1467,7 @@ function ProgressBar({
   resolvedTheme,
   onToggleTheme,
   onShowHelp,
+  onBrowseFiles,
 }: {
   treeOpen: boolean
   onToggleTree: () => void
@@ -1449,6 +1478,7 @@ function ProgressBar({
   resolvedTheme: 'light' | 'dark'
   onToggleTheme: () => void
   onShowHelp: () => void
+  onBrowseFiles?: () => void
 }) {
   const total = Object.keys(fileHashes).length
   const viewedCount = Object.entries(fileHashes).filter(
@@ -1479,6 +1509,11 @@ function ProgressBar({
           <SidebarIcon open={treeOpen} />
         </button>
       </Tip>
+      {onBrowseFiles && (
+        <button type="button" className="btn" onClick={onBrowseFiles}>
+          Files
+        </button>
+      )}
       {/* title gives a native tooltip when the command is ellipsized */}
       <code className="diff-command" title={command}>
         {command}
@@ -1795,7 +1830,13 @@ function topFileName(
   return name
 }
 
-function DiffView() {
+function DiffView({
+  onOpenFile,
+  onBrowseFiles,
+}: {
+  onOpenFile: (path: string, line?: number) => void
+  onBrowseFiles: () => void
+}) {
   const isWide = useMediaQuery(wideQuery)
   const isNarrow = useMediaQuery(narrowQuery)
   const [splitMode, setSplitMode] = useState<SplitMode>('responsive')
@@ -2089,6 +2130,7 @@ function DiffView() {
   // a symlink, or the reverse, parses as two entries sharing one name.
   // CodeView needs one item per id, so the merge helper folds them into
   // a single entry first.
+
   const patch = data?.patch
   // The last parse of each file. A refetch reuses it for a file whose content
   // hasn't changed, so the file keeps its identity: the open comment box stays
@@ -2640,6 +2682,23 @@ function DiffView() {
             setCollapsed((prev) => ({ ...prev, [name]: mark }))
             markMutation.mutate({ file: name, hash, mark })
           }}
+          onOpenFile={
+            data?.repositoryBrowser && item.fileDiff.type !== 'deleted' && !data.interdiff
+              ? () => {
+                  const hunk = item.fileDiff.hunks[0]
+                  const context = hunk?.hunkContent[0]
+                  const line =
+                    hunk && data?.commentsEnabled
+                      ? Math.max(
+                          1,
+                          hunk.additionStart +
+                            (context?.type === 'context' ? context.lines : 0),
+                        )
+                      : undefined
+                  onOpenFile(name, line)
+                }
+              : undefined
+          }
           onToggleExpand={() => {
             anchorIfTopFile(name)
             const willExpand = !(expandedFiles[name] ?? false)
@@ -2662,6 +2721,7 @@ function DiffView() {
       markMutation,
       anchorIfTopFile,
       effectiveFocused,
+      onOpenFile,
     ],
   )
 
@@ -3429,6 +3489,13 @@ function DiffView() {
   if (!patch)
     return (
       <>
+        {data.repositoryBrowser && (
+          <nav className="review-modes" aria-label="Review mode">
+            <button type="button" className="btn" onClick={onBrowseFiles}>
+              Files
+            </button>
+          </nav>
+        )}
         {diffChanged && (
           <div className="header-row diff-changed-standalone">
             <DiffChangedToast changes={changes} onRefresh={refreshDiff} />
@@ -3466,6 +3533,7 @@ function DiffView() {
             resolvedTheme={resolvedTheme}
             onToggleTheme={toggleTheme}
             onShowHelp={() => setShowHelp(true)}
+            onBrowseFiles={data.repositoryBrowser ? onBrowseFiles : undefined}
             onUnviewAll={() => {
               const entries = Object.entries(viewed).map(([file, hash]) => ({ file, hash }))
               if (entries.length === 0) return
@@ -3549,6 +3617,356 @@ function DiffView() {
   )
 }
 
+type FileReviewLocation = { path: string; line?: number }
+type FileReviewNote = {
+  id: number
+  path: string
+  revision: string
+  lines: [number, number]
+  text: string
+  label: string
+  status: string
+  pending?: boolean
+  error?: string
+}
+type FileReviewNotes = ReturnType<typeof useFileReviewNotes>
+
+function useFileReviewNotes() {
+  const [notes, setNotes] = useState<FileReviewNote[]>([])
+  const nextId = useRef(0)
+  const add = useCallback((request: RepositoryReview, label: string, send: boolean) => {
+    const id = ++nextId.current
+    const note: FileReviewNote = {
+      id,
+      path: request.path,
+      revision: request.revision,
+      lines: request.lines,
+      text: request.text,
+      label,
+      status: send ? 'Sending…' : 'Local note',
+      pending: send,
+    }
+    setNotes((previous) => [...previous, note])
+    if (!send) return
+    const settle = (status: string, error?: string) =>
+      setNotes((previous) =>
+        previous.map((row) =>
+          row.id === id ? { ...row, status, error, pending: false } : row,
+        ),
+      )
+    void apiFetch<{ status: string }>('api/repository-review', {
+      method: 'POST',
+      body: request,
+    }).then(
+      ({ status }) => settle(status),
+      (error: unknown) =>
+        settle(
+          'Delivery not confirmed',
+          error instanceof Error ? error.message : 'Check the destination before retrying.',
+        ),
+    )
+  }, [])
+  const dismiss = useCallback(
+    (id: number) => setNotes((previous) => previous.filter((note) => note.id !== id)),
+    [],
+  )
+  return { notes, add, dismiss }
+}
+
+const emptyFileStatuses: GitStatusEntry[] = []
+const emptyFileViewed = new Set<string>()
+const emptyRepositoryPaths: string[] = []
+
+function FilesView({
+  location,
+  onLocation,
+  review,
+}: {
+  location: FileReviewLocation | null
+  onLocation: (location: FileReviewLocation) => void
+  review: FileReviewNotes
+}) {
+  const directory = useQuery({
+    queryKey: ['repository-files'],
+    queryFn: () => apiFetch<RepositoryFilesResponse>('api/repository-files'),
+    refetchOnWindowFocus: false,
+  })
+  const path = location?.path
+  const file = useQuery({
+    queryKey: ['repository-file', path],
+    queryFn: () =>
+      apiFetch<RepositoryFile>(
+        `api/repository-file?${new URLSearchParams({ path: path! })}`,
+      ),
+    enabled: !!path,
+    refetchOnWindowFocus: false,
+  })
+  const { data: themeData } = useQuery({
+    queryKey: ['theme'],
+    queryFn: () => apiFetch<ThemeResponse>('api/theme'),
+    initialData: { theme: initialTheme },
+  })
+  const paths = useMemo(
+    () => directory.data?.paths.toSorted(compareTreeOrder) ?? emptyRepositoryPaths,
+    [directory.data],
+  )
+  const [draft, setDraft] = useState<{
+    lines: [number, number]
+    revision: string
+    path: string
+  } | null>(null)
+  const currentDraft =
+    draft?.path === path && draft?.revision === file.data?.revision ? draft : null
+  const view = useRef<CodeViewHandle<FileReviewNote, undefined>>(null)
+  const snapshot = file.data
+  const fileId = snapshot ? `${snapshot.path}:${snapshot.revision}` : null
+  const visibleNotes = useMemo(
+    () =>
+      review.notes.filter(
+        (note) => note.path === path && note.revision === snapshot?.revision,
+      ),
+    [review.notes, path, snapshot?.revision],
+  )
+  const previousNoteVersion = useRef({ notes: visibleNotes, version: 0 })
+  if (previousNoteVersion.current.notes !== visibleNotes) {
+    previousNoteVersion.current = {
+      notes: visibleNotes,
+      version: previousNoteVersion.current.version + 1,
+    }
+  }
+  const version = previousNoteVersion.current.version
+  const items = useMemo<CodeViewFileItem<FileReviewNote>[]>(
+    () =>
+      !snapshot || !fileId || !snapshot.contents
+        ? []
+        : [
+            {
+              id: fileId,
+              type: 'file',
+              file: { name: snapshot.path, contents: snapshot.contents, cacheKey: fileId },
+              annotations: visibleNotes.map((note) => ({
+                lineNumber: note.lines[1],
+                metadata: note,
+              })),
+              version,
+            },
+          ],
+    [fileId, snapshot, version, visibleNotes],
+  )
+  const ref = useRef(snapshot)
+  ref.current = snapshot
+  const options = useMemo<CodeViewOptions<FileReviewNote, undefined>>(
+    () => ({
+      theme: DIFF_THEME,
+      themeType: themeData.theme,
+      preferredHighlighter: HIGHLIGHTER,
+      overflow: 'wrap',
+      enableGutterUtility: true,
+      enableLineSelection: true,
+      layout: { paddingTop: 0, paddingBottom: 8, gap: 8 },
+      onGutterUtilityClick: (range) => {
+        const current = ref.current
+        if (!current) return
+        setDraft({
+          lines: [Math.min(range.start, range.end), Math.max(range.start, range.end)],
+          path: current.path,
+          revision: current.revision,
+        })
+      },
+    }),
+    [themeData.theme],
+  )
+
+  useEffect(() => {
+    if (!fileId || !location?.line || !snapshot?.contents) return
+    const lineNumber = Math.min(
+      location.line,
+      snapshot.contents.trimEnd().split('\n').length,
+    )
+    const tick = requestAnimationFrame(() =>
+      view.current?.getInstance()?.scrollTo({
+        type: 'line',
+        id: fileId,
+        lineNumber,
+        align: 'center',
+      }),
+    )
+    return () => cancelAnimationFrame(tick)
+  }, [fileId, location?.line, snapshot?.contents])
+
+  const save = (text: string, choices?: OrcaChoice[], send = false) => {
+    if (!currentDraft) return
+    const body = { ...currentDraft, text }
+    if (choices) {
+      for (const { id, kind, label } of choices)
+        review.add({ ...body, target: { id, kind } }, label, true)
+    } else {
+      review.add(body, send ? 'External command' : '', send)
+    }
+    setDraft(null)
+    view.current?.getInstance()?.setSelectedLines(null)
+  }
+
+  return (
+    <div className="repo-browser">
+      <div className="repo-browser-tree">
+        <div className="repo-toolbar">
+          <strong>Repository files</strong>
+          <Button variant="ghost" onClick={() => void directory.refetch()}>
+            Refresh files
+          </Button>
+        </div>
+        {directory.error ? (
+          <p role="alert">{directory.error.message}</p>
+        ) : directory.isPending ? (
+          <p>Loading files…</p>
+        ) : paths.length ? (
+          <FileTreePanel
+            paths={paths}
+            gitStatus={emptyFileStatuses}
+            viewed={emptyFileViewed}
+            focusedFile={path ?? null}
+            startCollapsed
+            onSelectFile={(selected) => {
+              if (path !== selected) setDraft(null)
+              onLocation({ path: selected })
+            }}
+          />
+        ) : (
+          <p>No reviewable files in this checkout.</p>
+        )}
+      </div>
+      <div className="repo-browser-content">
+        {path && (
+          <div className="repo-toolbar">
+            <strong title={path}>{path}</strong>
+            <Button
+              variant="ghost"
+              disabled={file.isFetching}
+              onClick={() => void file.refetch()}
+            >
+              Refresh file
+            </Button>
+          </div>
+        )}
+        {!path ? (
+          <div className="empty-diff">Select a file to read or review it.</div>
+        ) : file.isPending ? (
+          <div className="empty-diff">Loading file…</div>
+        ) : file.error ? (
+          <p className="repo-file-message" role="alert">
+            {file.error.message}
+          </p>
+        ) : !snapshot?.contents ? (
+          <div className="empty-diff">This file is empty.</div>
+        ) : (
+          <>
+            {currentDraft && (
+              <div className="repo-file-composer">
+                <strong>
+                  {currentDraft.lines[0] === currentDraft.lines[1]
+                    ? `Review line ${currentDraft.lines[0]}`
+                    : `Review lines ${currentDraft.lines.join('–')}`}
+                </strong>
+                <CommentForm
+                  key={currentDraft.lines.join(':')}
+                  copy={null}
+                  initialText=""
+                  onTextChange={() => {}}
+                  onSubmit={save}
+                  localNote
+                  onSend={
+                    directory.data?.send && !directory.data.orca
+                      ? (text) => save(text, undefined, true)
+                      : undefined
+                  }
+                  onOrcaSend={directory.data?.orca ? save : undefined}
+                  inlineUnavailable={null}
+                  onCancel={() => setDraft(null)}
+                  submitting={false}
+                  error={null}
+                  syntax={null}
+                />
+              </div>
+            )}
+            <CodeView
+              key={fileId}
+              ref={view}
+              className="codeview-root repo-codeview"
+              items={items}
+              options={options}
+              renderAnnotation={({ metadata: note }, _file, _item) => (
+                <div className="sent-comment">
+                  <div className="sent-comment-head">
+                    <span role="status">
+                      {note.status}
+                      {note.label ? ` · ${note.label}` : ''}
+                    </span>
+                    <button
+                      className="sent-comment-dismiss"
+                      type="button"
+                      aria-label="Dismiss"
+                      disabled={note.pending}
+                      onClick={() => review.dismiss(note.id)}
+                    >
+                      ×
+                    </button>
+                  </div>
+                  <div className="sent-comment-text">{note.text}</div>
+                  {note.error && (
+                    <div role="alert" className="comment-form-error">
+                      {note.error}
+                    </div>
+                  )}
+                </div>
+              )}
+            />
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+function ReviewWorkspace() {
+  const [mode, setMode] = useState<'diff' | 'files'>('diff')
+  const [location, setLocation] = useState<FileReviewLocation | null>(null)
+  const review = useFileReviewNotes()
+  const openFile = useCallback((path: string, line?: number) => {
+    setLocation({ path, line })
+    setMode('files')
+  }, [])
+  return (
+    <>
+      {mode === 'files' && (
+        <nav className="review-modes" aria-label="Review mode">
+          <button
+            type="button"
+            className="btn"
+            aria-pressed="false"
+            onClick={() => setMode('diff')}
+          >
+            Diff
+          </button>
+          <button
+            type="button"
+            className="btn"
+            aria-pressed="true"
+            onClick={() => setMode('files')}
+          >
+            Files
+          </button>
+        </nav>
+      )}
+      {mode === 'diff' ? (
+        <DiffView onOpenFile={openFile} onBrowseFiles={() => setMode('files')} />
+      ) : (
+        <FilesView location={location} onLocation={setLocation} review={review} />
+      )}
+    </>
+  )
+}
+
 // Shiki highlights on a worker pool. On the main thread it froze the page for
 // about 700 ms loading a 10k-line file, because TextMate tokenization has to
 // walk a file from the top. Highlights runs on the main thread: it's fast
@@ -3566,7 +3984,7 @@ const highlighterOptions = { theme: DIFF_THEME, preferredHighlighter: HIGHLIGHTE
 export function App() {
   const app = (
     <Tooltip.Provider>
-      <DiffView />
+      <ReviewWorkspace />
     </Tooltip.Provider>
   )
   return (

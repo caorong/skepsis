@@ -12,6 +12,8 @@ import { serveStatic } from '@hono/node-server/serve-static'
 import { zValidator } from '@hono/zod-validator'
 import { basename, join } from 'node:path'
 import type { DiffArgs } from '../shared/types.ts'
+import { repoRoot } from './diffSource.ts'
+import { createRepositoryFiles, sourceLines } from './repositoryFiles.ts'
 import { getDiff, patchHash } from './diff.ts'
 import { displayCommand } from './displayCommand.ts'
 import { getFileContents } from './fileContents.ts'
@@ -21,7 +23,7 @@ import { insertComment, removeComment } from './comment.ts'
 import { getCommentSyntaxes } from './commentSyntax.ts'
 import { loadTheme, saveTheme, themeBootScript } from './settings.ts'
 import { newToken, sendGate, tokenMatches } from './gate.ts'
-import { buildPayload } from './send.ts'
+import { buildPayload, renderPrompt } from './send.ts'
 import type { OrcaBridge } from './orca.ts'
 import type { SendPayload, SendResult } from './send.ts'
 import {
@@ -32,6 +34,7 @@ import {
   commentDeleteSchema,
   sendRequestSchema,
   orcaRequestSchema,
+  repositoryReviewSchema,
   fileContentsQuerySchema,
   themeRequestSchema,
   DEFAULT_TAB_SIZE,
@@ -40,6 +43,7 @@ import {
 import type {
   DiffHashResponse,
   DiffResponse,
+  RepositoryFilesResponse,
   FileContentsResponse,
   OkResponse,
   ErrorResponse,
@@ -56,6 +60,8 @@ export interface BuildOptions {
    *  the page has no Send button. */
   send?: ((payload: SendPayload) => Promise<SendResult>) | null
   orca?: OrcaBridge
+  /** Only the local CLI opts into browsing beyond the configured diff. */
+  repositoryBrowser?: boolean
   /** Default true: API requests need the per-run token, and /api/send needs
    *  a loopback Host and a matching Origin. False when a host application
    *  checks requests before they get here */
@@ -75,7 +81,15 @@ export interface App {
 /** The page and its API for one diff. Runs the diff once and rejects if it
  *  fails. */
 export async function buildApp(opts: BuildOptions): Promise<App> {
-  const { diffSource, cwd, poll = true, send, orca, guard = true } = opts
+  const {
+    diffSource,
+    cwd,
+    poll = true,
+    send,
+    orca,
+    guard = true,
+    repositoryBrowser = false,
+  } = opts
   const { tabSize = DEFAULT_TAB_SIZE } = opts
   // The paths in the latest diff, including the old names of renames. A
   // request's path is joined onto the repo directory, so the routes that read
@@ -149,6 +163,7 @@ export async function buildApp(opts: BuildOptions): Promise<App> {
       poll,
       send: !!send || !!orca,
       ...(orca ? { orca: true } : {}),
+      ...(repositoryBrowser && guard ? { repositoryBrowser: true } : {}),
       tabSize,
       viewed,
       commentSyntaxes,
@@ -270,6 +285,93 @@ export async function buildApp(opts: BuildOptions): Promise<App> {
         return c.json({ error: (error as Error).message } satisfies ErrorResponse, 502)
       }
     })
+  }
+
+  // File review is explicit and independent of the currently selected diff range.
+  let repo: ReturnType<typeof createRepositoryFiles> | undefined
+  const repository = () =>
+    (repo ??= createRepositoryFiles(repoRoot(cwd, diffSource.vcs), diffSource.vcs))
+  if (repositoryBrowser && guard) {
+    app.get('/api/repository-files', async (c) =>
+      c.json({
+        paths: await repository().paths(),
+        send: !!send || (!!orca && guard),
+        orca: !!orca && guard,
+        tabSize,
+      } satisfies RepositoryFilesResponse),
+    )
+    app.get('/api/repository-file', async (c) => {
+      const file = c.req.query('path')
+      if (!file || file.length > 4096)
+        throw new HTTPException(400, { message: 'Choose a file.' })
+      return c.json(await repository().read(file))
+    })
+    if (send || (orca && guard)) {
+      app.post(
+        '/api/repository-review',
+        async (c, next) => {
+          if (
+            guard &&
+            !sendGate({ host: c.req.header('host'), origin: c.req.header('origin') })
+          )
+            return c.json({ error: 'forbidden' } satisfies ErrorResponse, 403)
+          await next()
+        },
+        zValidator('json', repositoryReviewSchema),
+        async (c) => {
+          const request = c.req.valid('json')
+          if ((request.target && !(orca && guard)) || (!request.target && !send))
+            throw new HTTPException(400, {
+              message: 'Choose an enabled review destination.',
+            })
+          const file = await repository().read(request.path)
+          if (file.revision !== request.revision)
+            throw new HTTPException(409, {
+              message: 'File changed on disk. Refresh the file before sending.',
+            })
+          const lines = sourceLines(file.contents)
+          const [first, last] = request.lines
+          if (last < first || last > lines.length)
+            throw new HTTPException(400, { message: 'Select a valid line range.' })
+          if (last - first >= 200)
+            throw new HTTPException(400, { message: 'Select at most 200 lines.' })
+          const from = Math.max(1, first - 3)
+          const to = Math.min(lines.length, last + 3)
+          const excerpt = lines.slice(from - 1, to).join('\n')
+          if (Buffer.byteLength(excerpt) > 32_000)
+            throw new HTTPException(413, {
+              message: 'The selected code is too large to send. Select fewer lines.',
+            })
+          const base = {
+            version: 1 as const,
+            root: repository().root,
+            diff: { command: 'Working tree', toWorkingCopy: true },
+            scope: 'working-tree' as const,
+            file: file.path,
+            side: 'additions' as const,
+            lines: request.lines,
+            columns: null,
+            code: [{ lines: [from, to] as [number, number], text: excerpt }],
+            blob: null,
+            text: request.text,
+          }
+          const payload = { ...base, prompt: renderPrompt(base) }
+          try {
+            if (request.target && orca)
+              return c.json(await orca.deliver(request.target, payload))
+            const run = () => send!(payload)
+            const pending = sendQueue.then(run, run)
+            sendQueue = pending
+            const result = await pending
+            if (!result.ok)
+              return c.json({ error: result.error } satisfies ErrorResponse, 502)
+            return c.json({ status: 'Sent' })
+          } catch (error) {
+            return c.json({ error: (error as Error).message } satisfies ErrorResponse, 502)
+          }
+        },
+      )
+    }
   }
 
   app.delete('/api/comment', zValidator('json', commentDeleteSchema), async (c) => {
