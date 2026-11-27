@@ -46,7 +46,7 @@ import type {
   LineAnnotation,
   SelectedLineRange,
 } from '@pierre/diffs'
-import { THEME_MODES, TOKEN_HEADER } from '../shared/types.ts'
+import { DEFAULT_TAB_SIZE, THEME_MODES, TOKEN_HEADER } from '../shared/types.ts'
 import { mergeDuplicateFiles } from './diffFiles.ts'
 import type {
   CommentRequest,
@@ -397,6 +397,15 @@ function fileNotice(file: FileDiffMetadata): string | null {
 // blue. Only the exceptions (added, deleted, renamed) stand out.
 const TREE_STATUS: Record<FileDiffMetadata['type'], GitStatus | null> = {
   change: null,
+  new: 'added',
+  deleted: 'deleted',
+  'rename-pure': 'renamed',
+  'rename-changed': 'renamed',
+}
+
+// In Files view most files are unchanged, so modified files stand out too.
+const REPO_TREE_STATUS: Record<FileDiffMetadata['type'], GitStatus | null> = {
+  change: 'modified',
   new: 'added',
   deleted: 'deleted',
   'rename-pure': 'renamed',
@@ -808,7 +817,13 @@ function lineContext(
 const marker = ({ prefix, suffix }: CommentSyntax) =>
   suffix ? `${prefix} ${suffix}` : prefix
 
-type OrcaChoice = OrcaTarget & { label: string }
+type OrcaChoice = OrcaTarget & {
+  label: string
+  title?: string
+  agent?: string
+  sessionKind?: 'chat' | 'terminal'
+  state?: string
+}
 const orcaChoiceKey = ({ kind, id }: OrcaChoice) => `${kind}:${id}`
 
 function OrcaChoiceGroup({
@@ -825,30 +840,63 @@ function OrcaChoiceGroup({
   onChange: (values: string[]) => void
 }) {
   return (
-    <fieldset className="orca-choices">
-      <legend>{title}</legend>
-      {items.length === 0 && <span>{empty}</span>}
-      {items.map((item) => {
-        const key = orcaChoiceKey(item)
-        const checked = selected.includes(key)
-        return (
-          <label key={key}>
-            <input
-              type="checkbox"
-              checked={checked}
-              disabled={!checked && selected.length >= 8}
-              onChange={(e) =>
-                onChange(
-                  e.target.checked
-                    ? [...selected, key]
-                    : selected.filter((value) => value !== key),
-                )
-              }
-            />
-            {item.label}
-          </label>
-        )
-      })}
+    <fieldset className="orca-group">
+      <legend className="orca-group-title">{title}</legend>
+      {items.length === 0 ? (
+        <span className="orca-empty">{empty}</span>
+      ) : (
+        <div className="orca-chips">
+          {items.map((item) => {
+            const key = orcaChoiceKey(item)
+            const checked = selected.includes(key)
+            const disabled = !checked && selected.length >= 8
+            const meta = [item.agent, item.state].filter(Boolean).join(' · ')
+            return (
+              <label
+                key={key}
+                className={
+                  'orca-chip' + (checked ? ' checked' : '') + (disabled ? ' disabled' : '')
+                }
+                title={item.label}
+              >
+                <input
+                  type="checkbox"
+                  className="orca-chip-checkbox"
+                  checked={checked}
+                  disabled={disabled}
+                  onChange={(e) =>
+                    onChange(
+                      e.target.checked
+                        ? [...selected, key]
+                        : selected.filter((value) => value !== key),
+                    )
+                  }
+                />
+                {item.kind === 'existing' && item.title ? (
+                  <>
+                    <span
+                      className="orca-state-dot"
+                      data-state={item.state ?? 'unknown'}
+                      aria-hidden="true"
+                    />
+                    <span className="orca-chip-title">{item.title}</span>
+                    {meta && <span className="orca-chip-meta">{meta}</span>}
+                  </>
+                ) : (
+                  <>
+                    {item.kind === 'new' && (
+                      <span className="orca-chip-plus" aria-hidden="true">
+                        +
+                      </span>
+                    )}
+                    <span className="orca-chip-title">{item.label}</span>
+                  </>
+                )}
+              </label>
+            )
+          })}
+        </div>
+      )}
     </fieldset>
   )
 }
@@ -903,6 +951,10 @@ function CommentForm({
   const existing: OrcaChoice[] = (orca.data?.existing ?? []).map((row) => ({
     id: row.id,
     label: row.label,
+    title: row.title,
+    agent: row.agent,
+    sessionKind: row.kind,
+    state: row.state,
     kind: 'existing',
   }))
   const fresh: OrcaChoice[] = (orca.data?.fresh ?? []).map((row) => ({
@@ -964,24 +1016,34 @@ function CommentForm({
       {onOrcaSend && (
         <div className="orca-picker">
           <div className="orca-picker-head">
-            <strong>Orca{orca.data ? ` · ${orca.data.workspace}` : ''}</strong>
-            <Button
-              variant="ghost"
+            <span className="orca-picker-title">
+              Orca{orca.data ? ` · ${orca.data.workspace}` : ''}
+            </span>
+            {picks.length > 0 && (
+              <span className="orca-picker-count">{picks.length} selected</span>
+            )}
+            <button
+              type="button"
+              className="orca-refresh-button"
               disabled={orca.isFetching}
               onClick={() => void orca.refetch()}
             >
-              Refresh agents
-            </Button>
+              {orca.isFetching && orca.data ? 'Refreshing…' : 'Refresh agents'}
+            </button>
           </div>
-          {orca.isFetching ? (
-            <div role="status">Loading agents…</div>
+          {orca.isFetching && !orca.data ? (
+            <div role="status" className="orca-status">
+              Loading agents…
+            </div>
           ) : orca.error ? (
             <div role="alert" className="comment-form-error">
               {orca.error.message}
             </div>
           ) : (
-            <>
-              {orca.data?.truncated && <div>Orca returned a partial list.</div>}
+            <div className={'orca-picker-groups' + (orca.isFetching ? ' refreshing' : '')}>
+              {orca.data?.truncated && (
+                <div className="orca-notice">Orca returned a partial list.</div>
+              )}
               <OrcaChoiceGroup
                 title="Existing agents · reuse context"
                 items={existing}
@@ -996,7 +1058,7 @@ function CommentForm({
                 selected={selected}
                 onChange={setSelected}
               />
-            </>
+            </div>
           )}
         </div>
       )}
@@ -1185,6 +1247,40 @@ function HelpIcon() {
   )
 }
 
+function CopyPathButton({ path }: { path: string }) {
+  const [copiedPath, setCopiedPath] = useState<string | null>(null)
+  const copied = copiedPath === path
+  const timerRef = useRef<ReturnType<typeof setTimeout>>(undefined)
+  useEffect(() => () => clearTimeout(timerRef.current), [])
+  return (
+    /* closeOnClick={false} so the tooltip stays up and flips to "Copied!". */
+    <Tip text={copied ? 'Copied!' : 'Copy file name to clipboard'} closeOnClick={false}>
+      <button
+        type="button"
+        className={'copy-name-button' + (copied ? ' copied' : '')}
+        aria-label="Copy file name to clipboard"
+        onClick={(e) => {
+          e.stopPropagation()
+          void navigator.clipboard.writeText(path).then(() => {
+            setCopiedPath(path)
+            clearTimeout(timerRef.current)
+            // Hold the check long enough that attention moves on before it
+            // cross-fades back to the clipboard.
+            timerRef.current = setTimeout(() => setCopiedPath(null), 2000)
+          })
+        }}
+      >
+        {/* Both glyphs stay mounted and cross-fade so the swap back to the
+            clipboard isn't an abrupt cut. */}
+        <span className="copy-icon-stack">
+          <CopyIcon />
+          <CheckIcon />
+        </span>
+      </button>
+    </Tip>
+  )
+}
+
 function FileHeader({
   fileDiff,
   isViewed,
@@ -1216,7 +1312,6 @@ function FileHeader({
   onOpenFile?: () => void
 }) {
   const { additions, deletions } = getFileStats(fileDiff)
-  const [copied, setCopied] = useState(false)
   return (
     <div
       className={'file-header' + (focused ? ' focused' : '')}
@@ -1246,30 +1341,7 @@ function FileHeader({
           {fileDiff.name}
         </span>
       </span>
-      {/* closeOnClick={false} so the tooltip stays up and flips to "Copied!". */}
-      <Tip text={copied ? 'Copied!' : 'Copy file name to clipboard'} closeOnClick={false}>
-        <button
-          type="button"
-          className={'copy-name-button' + (copied ? ' copied' : '')}
-          aria-label="Copy file name to clipboard"
-          onClick={(e) => {
-            e.stopPropagation()
-            void navigator.clipboard.writeText(fileDiff.name).then(() => {
-              setCopied(true)
-              // Hold the check long enough that attention moves on before it
-              // cross-fades back to the clipboard.
-              setTimeout(() => setCopied(false), 2000)
-            })
-          }}
-        >
-          {/* Both glyphs stay mounted and cross-fade so the swap back to the
-              clipboard isn't an abrupt cut. */}
-          <span className="copy-icon-stack">
-            <CopyIcon />
-            <CheckIcon />
-          </span>
-        </button>
-      </Tip>
+      <CopyPathButton path={fileDiff.name} />
       {generated && <span className="generated-label">Generated</span>}
       {showExpand && (
         <Tip
@@ -1443,23 +1515,56 @@ function FileTreePanel({
 
 // The file tree's search box, or null when the tree is hidden. The box is
 // always rendered; reach into the (open) shadow root for it.
-function treeSearchInput(): HTMLInputElement | null {
-  return document.querySelector('.file-tree')?.shadowRoot?.querySelector('input') ?? null
+function treeSearchInput(root: ParentNode = document): HTMLInputElement | null {
+  return root.querySelector('.file-tree')?.shadowRoot?.querySelector('input') ?? null
 }
 
 // Focus the file tree's search box. The library's own focus logic only fires
 // on its closed→open transition, so focus directly. Returns false when the
 // tree is hidden.
-function focusTreeSearch(): boolean {
-  const input = treeSearchInput()
+function focusTreeSearch(root: ParentNode = document): boolean {
+  const input = treeSearchInput(root)
   if (!input) return false
   input.focus()
   return true
 }
 
+type ReviewMode = 'diff' | 'files'
+
+function ModeSwitch({
+  mode,
+  onModeChange,
+}: {
+  mode: ReviewMode
+  onModeChange: (mode: ReviewMode) => void
+}) {
+  return (
+    <nav className="mode-switch" aria-label="Review mode">
+      <button
+        type="button"
+        className="mode-switch-button"
+        aria-pressed={mode === 'diff'}
+        onClick={() => onModeChange('diff')}
+      >
+        Diff
+      </button>
+      <button
+        type="button"
+        className="mode-switch-button"
+        aria-pressed={mode === 'files'}
+        onClick={() => onModeChange('files')}
+      >
+        Files
+      </button>
+    </nav>
+  )
+}
+
 function ProgressBar({
   treeOpen,
   onToggleTree,
+  mode,
+  onModeChange,
   command,
   fileHashes,
   viewed,
@@ -1467,78 +1572,84 @@ function ProgressBar({
   resolvedTheme,
   onToggleTheme,
   onShowHelp,
-  onBrowseFiles,
 }: {
-  treeOpen: boolean
-  onToggleTree: () => void
-  command: string
-  fileHashes: FileHashes
-  viewed: ViewedMap
-  onUnviewAll: () => void
+  treeOpen?: boolean
+  onToggleTree?: () => void
+  mode?: ReviewMode
+  onModeChange?: (mode: ReviewMode) => void
+  command?: string
+  fileHashes?: FileHashes
+  viewed?: ViewedMap
+  onUnviewAll?: () => void
   resolvedTheme: 'light' | 'dark'
   onToggleTheme: () => void
   onShowHelp: () => void
-  onBrowseFiles?: () => void
 }) {
-  const total = Object.keys(fileHashes).length
-  const viewedCount = Object.entries(fileHashes).filter(
-    ([file, hash]) => viewed[file] === hash,
-  ).length
-
-  if (total === 0) return null
+  const total = fileHashes ? Object.keys(fileHashes).length : 0
+  const viewedCount =
+    fileHashes && viewed
+      ? Object.entries(fileHashes).filter(([file, hash]) => viewed[file] === hash).length
+      : 0
+  const showProgress = total > 0 && viewed != null && onUnviewAll != null
 
   const otherTheme = resolvedTheme === 'dark' ? 'light' : 'dark'
   const treeLabel = treeOpen ? 'Hide file tree' : 'Show file tree'
 
   return (
     <div className="progress-bar">
-      <Tip
-        text={
-          <>
-            {treeLabel} <kbd>b</kbd>
-          </>
-        }
-      >
-        <button
-          type="button"
-          className="icon-button"
-          aria-label={treeLabel}
-          aria-expanded={treeOpen}
-          onClick={onToggleTree}
+      {onToggleTree && (
+        <Tip
+          text={
+            <>
+              {treeLabel} <kbd>b</kbd>
+            </>
+          }
         >
-          <SidebarIcon open={treeOpen} />
-        </button>
-      </Tip>
-      {onBrowseFiles && (
-        <button type="button" className="btn" onClick={onBrowseFiles}>
-          Files
-        </button>
+          <button
+            type="button"
+            className="icon-button"
+            aria-label={treeLabel}
+            aria-expanded={treeOpen}
+            onClick={onToggleTree}
+          >
+            <SidebarIcon open={!!treeOpen} />
+          </button>
+        </Tip>
       )}
+      {mode && onModeChange && <ModeSwitch mode={mode} onModeChange={onModeChange} />}
       {/* title gives a native tooltip when the command is ellipsized */}
-      <code className="diff-command" title={command}>
-        {command}
-      </code>
-      <div className="progress-track">
-        <div
-          className="progress-fill"
-          style={{ width: `${(viewedCount / total) * 100}%` }}
-        />
-      </div>
-      <span className="progress-count">
-        {viewedCount}/{total} <span className="progress-files">files </span>viewed
-      </span>
-      <Tip text="Mark all files unviewed">
-        <button
-          type="button"
-          className={'unview-all-button' + (viewedCount === 0 ? ' disabled' : '')}
-          aria-disabled={viewedCount === 0}
-          onClick={() => {
-            if (viewedCount > 0) onUnviewAll()
-          }}
-        >
-          Clear
-        </button>
-      </Tip>
+      {command && (
+        <code className="diff-command" title={command}>
+          {command}
+        </code>
+      )}
+      {showProgress ? (
+        <>
+          <div className="progress-track">
+            <div
+              className="progress-fill"
+              style={{ width: `${(viewedCount / total) * 100}%` }}
+            />
+          </div>
+          <span className="progress-count">
+            {viewedCount}/{total} <span className="progress-files">files </span>viewed
+          </span>
+          <Tip text="Mark all files unviewed">
+            <button
+              type="button"
+              className={'unview-all-button' + (viewedCount === 0 ? ' disabled' : '')}
+              aria-disabled={viewedCount === 0}
+              onClick={() => {
+                if (viewedCount > 0) onUnviewAll()
+              }}
+            >
+              Clear
+            </button>
+          </Tip>
+        </>
+      ) : (
+        <span className="progress-spacer" />
+      )}
       {/* Two states in the UI over three in the model: the icon is the
           appearance currently on screen and pressing it flips to the other
           one. See toggleTheme for how that gets back to following the OS
@@ -1830,13 +1941,93 @@ function topFileName(
   return name
 }
 
+function useAppTheme() {
+  const qc = useQueryClient()
+  // Server-persisted so the preference survives the per-run ephemeral port (a
+  // fresh browser origin every run, which defeats web storage) and reaches
+  // other running instances. initialData comes from the data-theme attribute
+  // the server stamped into the HTML; the default refetchOnWindowFocus
+  // re-applies the stored value when a stale tab regains focus — the only
+  // moment cross-instance staleness is observable.
+  const { data: themeData } = useQuery({
+    queryKey: ['theme'],
+    queryFn: () => apiFetch<ThemeResponse>('api/theme'),
+    initialData: { theme: initialTheme },
+  })
+  const theme = themeData.theme
+
+  const themeMutation = useMutation({
+    mutationFn: (next: ThemeMode) =>
+      apiFetch('api/theme', { method: 'POST', body: { theme: next } }),
+    // Write the cache up front so the toggle doesn't fight a stale entry.
+    onMutate: (next) => qc.setQueryData(['theme'], { theme: next } satisfies ThemeResponse),
+  })
+  const mutateTheme = themeMutation.mutate
+
+  // Two-state toggle over the three-state model, per
+  // https://lea.verou.me/blog/2026/dark-mode-toggles/: flip to the opposite
+  // of what's on screen, and when that lands on what the OS already says,
+  // store 'system' rather than pinning the same value. So the press after an
+  // override returns to following the OS, with no third state in the UI.
+  //
+  // The OS preference is consulted here and only here — on user interaction.
+  // Reacting to an OS change by clearing a matching override would unpin the
+  // preference of anyone whose desktop switches on a schedule.
+  //
+  // Shared by the header button and the t shortcut, which toasts the return
+  // value. Reads the current mode from the query cache rather than closing
+  // over `theme`: the theme switch re-renders every CodeView item, so a
+  // second press during that render would otherwise see a stale mode.
+  const toggleTheme = useCallback(() => {
+    const cur = qc.getQueryData<ThemeResponse>(['theme'])?.theme ?? 'system'
+    const curDark = cur === 'system' ? systemDark() : cur === 'dark'
+    const nextDark = !curDark
+    const resolved: 'light' | 'dark' = nextDark ? 'dark' : 'light'
+    const stored: ThemeMode = nextDark === systemDark() ? 'system' : resolved
+    mutateTheme(stored)
+    return { stored, resolved }
+  }, [qc, mutateTheme])
+
+  // What's actually on screen: the override if there is one, else the OS
+  // preference, which the hook keeps live so the icon tracks an OS change.
+  const systemIsDark = useMediaQuery(darkQuery)
+  const resolvedTheme: 'light' | 'dark' =
+    theme === 'system' ? (systemIsDark ? 'dark' : 'light') : theme
+
+  useEffect(() => applyTheme(theme), [theme])
+
+  return { theme, resolvedTheme, toggleTheme }
+}
+
 function DiffView({
+  active,
+  paneRef,
+  mode,
+  onModeChange,
   onOpenFile,
-  onBrowseFiles,
+  theme,
+  resolvedTheme,
+  onToggleTheme,
+  showHelp,
+  onShowHelp,
+  jumpToFile,
+  onJumpHandled,
 }: {
+  active: boolean
+  paneRef: React.RefObject<HTMLDivElement | null>
+  mode: ReviewMode
+  onModeChange: (mode: ReviewMode) => void
   onOpenFile: (path: string, line?: number) => void
-  onBrowseFiles: () => void
+  theme: ThemeMode
+  resolvedTheme: 'light' | 'dark'
+  onToggleTheme: () => { stored: ThemeMode; resolved: 'light' | 'dark' }
+  showHelp: boolean
+  onShowHelp: (open: boolean | ((v: boolean) => boolean)) => void
+  jumpToFile: { path: string; seq: number } | null
+  onJumpHandled: () => void
 }) {
+  const activeRef = useRef(active)
+  activeRef.current = active
   const isWide = useMediaQuery(wideQuery)
   const isNarrow = useMediaQuery(narrowQuery)
   const [splitMode, setSplitMode] = useState<SplitMode>('responsive')
@@ -1864,10 +2055,10 @@ function DiffView({
   // focus once the tree has rendered.
   const focusSearchOnOpen = useRef(false)
   useEffect(() => {
-    if (!treeOpen || !focusSearchOnOpen.current) return
+    if (!active || !treeOpen || !focusSearchOnOpen.current) return
     focusSearchOnOpen.current = false
-    requestAnimationFrame(() => focusTreeSearch())
-  }, [treeOpen])
+    requestAnimationFrame(() => focusTreeSearch(paneRef.current ?? document))
+  }, [active, treeOpen, paneRef])
   // Files the user expanded via the header's expand-all-lines button: these are
   // re-parsed with whole-file context so every collapsed region is revealed.
   const [expandedFiles, setExpandedFiles] = useState<Record<string, boolean>>({})
@@ -1970,58 +2161,6 @@ function DiffView({
       return { ...prev, ...Object.fromEntries(seeded.map(([file]) => [file, true])) }
     })
   }, [data])
-
-  // Server-persisted so the preference survives the per-run ephemeral port (a
-  // fresh browser origin every run, which defeats web storage) and reaches
-  // other running instances. initialData comes from the data-theme attribute
-  // the server stamped into the HTML; the default refetchOnWindowFocus
-  // re-applies the stored value when a stale tab regains focus — the only
-  // moment cross-instance staleness is observable.
-  const { data: themeData } = useQuery({
-    queryKey: ['theme'],
-    queryFn: () => apiFetch<ThemeResponse>('api/theme'),
-    initialData: { theme: initialTheme },
-  })
-  const theme = themeData.theme
-
-  const themeMutation = useMutation({
-    mutationFn: (next: ThemeMode) =>
-      apiFetch('api/theme', { method: 'POST', body: { theme: next } }),
-    // Write the cache up front so the toggle doesn't fight a stale entry.
-    onMutate: (next) => qc.setQueryData(['theme'], { theme: next } satisfies ThemeResponse),
-  })
-  const mutateTheme = themeMutation.mutate
-
-  // Two-state toggle over the three-state model, per
-  // https://lea.verou.me/blog/2026/dark-mode-toggles/: flip to the opposite
-  // of what's on screen, and when that lands on what the OS already says,
-  // store 'system' rather than pinning the same value. So the press after an
-  // override returns to following the OS, with no third state in the UI.
-  //
-  // The OS preference is consulted here and only here — on user interaction.
-  // Reacting to an OS change by clearing a matching override would unpin the
-  // preference of anyone whose desktop switches on a schedule.
-  //
-  // Shared by the header button and the t shortcut, which toasts the return
-  // value. Reads the current mode from the query cache rather than closing
-  // over `theme`: the theme switch re-renders every CodeView item, so a
-  // second press during that render would otherwise see a stale mode.
-  const toggleTheme = useCallback(() => {
-    const cur = qc.getQueryData<ThemeResponse>(['theme'])?.theme ?? 'system'
-    const curDark = cur === 'system' ? systemDark() : cur === 'dark'
-    const nextDark = !curDark
-    const resolved = nextDark ? 'dark' : 'light'
-    const stored: ThemeMode = nextDark === systemDark() ? 'system' : resolved
-    mutateTheme(stored)
-    return { stored, resolved }
-  }, [qc, mutateTheme])
-
-  // What's actually on screen: the override if there is one, else the OS
-  // preference, which the hook keeps live so the icon tracks an OS change.
-  const systemIsDark = useMediaQuery(darkQuery)
-  const resolvedTheme = theme === 'system' ? (systemIsDark ? 'dark' : 'light') : theme
-
-  useEffect(() => applyTheme(theme), [theme])
 
   const markMutation = useMutation({
     mutationFn: ({ file, hash, mark }: { file: string; hash: string; mark: boolean }) =>
@@ -2391,9 +2530,9 @@ function DiffView({
   const commentsEnabled = data?.commentsEnabled ?? false
   const send = data?.send ?? false
 
-  const [showHelp, setShowHelp] = useState(false)
   const [showCommentsInfo, setShowCommentsInfo] = useState(false)
   const codeViewRef = useRef<CodeViewHandle<AnnotationMeta, undefined>>(null)
+  const codeViewElRef = useRef<HTMLDivElement>(null)
   // Clicking the gutter "+" leaves a line selection behind, and the library
   // pins the "+" to a selection. Clear it once the comment box closes, or the
   // "+" stops following the pointer.
@@ -2436,6 +2575,7 @@ function DiffView({
   const itemsRef = useRef<readonly CodeViewDiffItem<AnnotationMeta>[]>([])
   const onScroll = useCallback(
     (scrollTop: number, viewer: { getTopForItem(id: string): number | undefined }) => {
+      if (!activeRef.current) return
       scrollTopRef.current = scrollTop
       if (programmaticScrollRef.current) {
         markProgrammaticScroll() // push the expiry out while frames keep coming
@@ -2615,6 +2755,47 @@ function DiffView({
     },
     [setFocused, scrollItemToStart],
   )
+
+  // Restore scroll position (or jump to a file requested from Files view)
+  // when switching back from Files view without unmounting DiffView.
+  const wasActiveRef = useRef(active)
+  useLayoutEffect(() => {
+    const wasActive = wasActiveRef.current
+    wasActiveRef.current = active
+    if (!active) return
+    if (jumpToFile) {
+      const target = jumpToFile.path
+      onJumpHandled()
+      if (itemsRef.current.some((it) => it.id === target)) {
+        setCollapsed((prev) => (prev[target] ? { ...prev, [target]: false } : prev))
+        setFocused(target)
+        scrollItemToStart(target)
+        return
+      }
+    }
+    if (!wasActive) {
+      const targetScroll = scrollTopRef.current
+      const el = codeViewElRef.current
+      if (el && targetScroll > 0) {
+        markProgrammaticScroll()
+        el.scrollTop = targetScroll
+        requestAnimationFrame(() => {
+          if (!activeRef.current || !codeViewElRef.current) return
+          if (Math.abs(codeViewElRef.current.scrollTop - targetScroll) > 1) {
+            markProgrammaticScroll()
+            codeViewElRef.current.scrollTop = targetScroll
+          }
+        })
+      }
+    }
+  }, [
+    active,
+    jumpToFile,
+    onJumpHandled,
+    setFocused,
+    scrollItemToStart,
+    markProgrammaticScroll,
+  ])
 
   useLayoutEffect(() => {
     const name = pendingAnchorRef.current
@@ -2882,10 +3063,9 @@ function DiffView({
 
   // Which item each rendered diff host shows, for text selections in it
   const hostFiles = useRef(new WeakMap<Element, string>())
+  const diffHosts = () => [...(paneRef.current?.querySelectorAll('diffs-container') ?? [])]
   const hostOf = (file: string) =>
-    [...document.querySelectorAll('diffs-container')].find(
-      (h) => hostFiles.current.get(h) === file,
-    )
+    diffHosts().find((h) => hostFiles.current.get(h) === file)
 
   // Selecting text in the diff opens the comment box on it, unless the open
   // box has a draft. A click in the code closes an empty box.
@@ -2896,7 +3076,7 @@ function DiffView({
       path.some((n) => n instanceof Element && n.matches(selector))
     if (inPath('.comment-form, [data-gutter]')) return
     const empty = !draftRef.current.trim()
-    const anchor = selectionAnchor([...document.querySelectorAll('diffs-container')])
+    const anchor = selectionAnchor(diffHosts())
     if (!anchor) {
       if (composingRef.current && empty && inPath('[data-line]')) setComposing(null)
       return
@@ -2945,12 +3125,12 @@ function DiffView({
       return
     if (e.composedPath().some((n) => n instanceof Element && n.matches('.comment-form')))
       return
-    for (const h of document.querySelectorAll('diffs-container')) {
+    for (const h of diffHosts()) {
       if (h.shadowRoot) closeLine(h.shadowRoot, INLINE_SLOT)
     }
   }
   useEffect(() => {
-    if (!send && !commentsEnabled) return
+    if (!active || (!send && !commentsEnabled)) return
     const onMouseDown = (e: MouseEvent) => selectionDownRef.current(e)
     const onMouseUp = (e: MouseEvent) => selectionUpRef.current(e)
     document.addEventListener('mousedown', onMouseDown, true)
@@ -2959,7 +3139,7 @@ function DiffView({
       document.removeEventListener('mousedown', onMouseDown, true)
       document.removeEventListener('mouseup', onMouseUp)
     }
-  }, [send, commentsEnabled])
+  }, [active, send, commentsEnabled])
 
   // A box on part of a line shows inside the line, after the screen row the
   // text ends on: it's slotted into the item host, into a slot put in the
@@ -2978,9 +3158,9 @@ function DiffView({
   markQuoteRef.current = () => {
     const c = composingRef.current
     const columns = c?.text?.columns
-    const host = c && columns ? hostOf(c.file) : undefined
+    const host = activeRef.current && c && columns ? hostOf(c.file) : undefined
     const range = (host && textRange(host, c!.side, c!.first, c!.line, columns!)) || null
-    for (const h of document.querySelectorAll('diffs-container')) {
+    for (const h of diffHosts()) {
       if (h.shadowRoot && h !== host) closeLine(h.shadowRoot, INLINE_SLOT)
     }
     if (host?.shadowRoot && range) {
@@ -2993,7 +3173,7 @@ function DiffView({
   }
   // Before the box focuses its textarea (a passive effect), which it can only
   // do once it's in the line
-  useLayoutEffect(() => markQuoteRef.current(), [composing])
+  useLayoutEffect(() => markQuoteRef.current(), [composing, active])
 
   const options = useMemo<CodeViewOptions<AnnotationMeta, undefined>>(
     () => ({
@@ -3095,6 +3275,9 @@ function DiffView({
   // moves through it and on into the next expanded file, and c comments on
   // the cursor line.
   useEffect(() => {
+    if (!active) return
+    const scopeRoot = () => paneRef.current ?? document
+
     // Index of the focused file (0 before any focus exists, matching the
     // effectiveFocused fallback).
     function currentIndex(): number {
@@ -3111,7 +3294,7 @@ function DiffView({
 
     // Height of the sticky file header, which occludes the top of the viewport.
     function headerHeight(): number {
-      return document.querySelector('.file-header')?.getBoundingClientRect().height ?? 0
+      return scopeRoot().querySelector('.file-header')?.getBoundingClientRect().height ?? 0
     }
 
     // Is the line fully visible (below the sticky header, above the bottom)?
@@ -3174,7 +3357,7 @@ function DiffView({
       // hidden. Checked before the input guard so it works from a comment box.
       if (e.key === 'k' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
         e.preventDefault()
-        if (!focusTreeSearch()) {
+        if (!focusTreeSearch(scopeRoot())) {
           focusSearchOnOpen.current = true
           setTreeOpen(true)
         }
@@ -3319,7 +3502,7 @@ function DiffView({
         }
         case '?':
           e.preventDefault()
-          setShowHelp((v) => !v)
+          onShowHelp((v) => !v)
           break
         case 'r':
           if (showHelp || !diffChanged) break
@@ -3329,7 +3512,7 @@ function DiffView({
         case 'Escape':
           if (showHelp) {
             e.preventDefault()
-            setShowHelp(false)
+            onShowHelp(false)
           } else if (showCommentsInfo) {
             e.preventDefault()
             setShowCommentsInfo(false)
@@ -3376,7 +3559,7 @@ function DiffView({
         case 't': {
           if (showHelp || composing) break
           e.preventDefault()
-          const { stored, resolved } = toggleTheme()
+          const { stored, resolved } = onToggleTheme()
           showToast(
             <>
               Theme: <code>{resolved}</code>
@@ -3396,8 +3579,8 @@ function DiffView({
       // Escape in the tree's search box: the tree's own handler closes the
       // search but stops propagation and leaves the (now empty) input focused,
       // where every diff shortcut is swallowed. Hand focus back to the diff.
-      if (e.key === 'Escape' && path[0] === treeSearchInput()) {
-        document
+      if (e.key === 'Escape' && path[0] === treeSearchInput(scopeRoot())) {
+        scopeRoot()
           .querySelector<HTMLElement>('.codeview-root')
           ?.focus({ preventScroll: true })
         return
@@ -3441,7 +3624,10 @@ function DiffView({
       window.removeEventListener('keydown', handler)
     }
   }, [
+    active,
+    paneRef,
     showHelp,
+    onShowHelp,
     showCommentsInfo,
     composing,
     files,
@@ -3462,7 +3648,7 @@ function DiffView({
     treeOpen,
     setTreeOpen,
     toggleTree,
-    toggleTheme,
+    onToggleTheme,
     diffChanged,
     refreshDiff,
     send,
@@ -3488,23 +3674,31 @@ function DiffView({
   if (data.error) return <pre style={{ color: 'red', padding: 20 }}>{data.error}</pre>
   if (!patch)
     return (
-      <>
-        {data.repositoryBrowser && (
-          <nav className="review-modes" aria-label="Review mode">
-            <button type="button" className="btn" onClick={onBrowseFiles}>
-              Files
-            </button>
-          </nav>
-        )}
-        {diffChanged && (
-          <div className="header-row diff-changed-standalone">
-            <DiffChangedToast changes={changes} onRefresh={refreshDiff} />
-          </div>
-        )}
+      <div className="diff-container">
+        <div className="header-row">
+          <ProgressBar
+            mode={data.repositoryBrowser ? mode : undefined}
+            onModeChange={data.repositoryBrowser ? onModeChange : undefined}
+            command={data.revset}
+            resolvedTheme={resolvedTheme}
+            onToggleTheme={onToggleTheme}
+            onShowHelp={() => onShowHelp(true)}
+          />
+          {toast && (
+            <div
+              className="toast"
+              key={toast.key}
+              style={{ animationDuration: `${toast.ms}ms` }}
+            >
+              {toast.content}
+            </div>
+          )}
+          {diffChanged && <DiffChangedToast changes={changes} onRefresh={refreshDiff} />}
+        </div>
         <div className="empty-diff">
           <code>{data.revset}</code> is empty
         </div>
-      </>
+      </div>
     )
 
   const { fileHashes } = data
@@ -3527,13 +3721,14 @@ function DiffView({
           <ProgressBar
             treeOpen={treeOpen}
             onToggleTree={toggleTree}
+            mode={data.repositoryBrowser ? mode : undefined}
+            onModeChange={data.repositoryBrowser ? onModeChange : undefined}
             command={data.revset}
             fileHashes={fileHashes}
             viewed={viewed}
             resolvedTheme={resolvedTheme}
-            onToggleTheme={toggleTheme}
-            onShowHelp={() => setShowHelp(true)}
-            onBrowseFiles={data.repositoryBrowser ? onBrowseFiles : undefined}
+            onToggleTheme={onToggleTheme}
+            onShowHelp={() => onShowHelp(true)}
             onUnviewAll={() => {
               const entries = Object.entries(viewed).map(([file, hash]) => ({ file, hash }))
               if (entries.length === 0) return
@@ -3557,7 +3752,6 @@ function DiffView({
           )}
           {diffChanged && <DiffChangedToast changes={changes} onRefresh={refreshDiff} />}
         </div>
-        {showHelp && <HelpModal send={data.send} onClose={() => setShowHelp(false)} />}
         {showCommentsInfo && (
           <CommentsModal
             vcs={data.vcs}
@@ -3597,6 +3791,7 @@ function DiffView({
           )}
           <CodeView
             ref={codeViewRef}
+            containerRef={codeViewElRef}
             className="codeview-root"
             items={items}
             options={options}
@@ -3677,20 +3872,91 @@ const emptyFileStatuses: GitStatusEntry[] = []
 const emptyFileViewed = new Set<string>()
 const emptyRepositoryPaths: string[] = []
 
+type FileAnnotationMeta =
+  | { type: 'note'; note: FileReviewNote }
+  | { type: 'composing'; lines: [number, number] }
+
 function FilesView({
   location,
   onLocation,
   review,
+  mode,
+  onModeChange,
+  onJumpToDiff,
+  theme,
+  resolvedTheme,
+  onToggleTheme,
+  showHelp,
+  onShowHelp,
 }: {
   location: FileReviewLocation | null
   onLocation: (location: FileReviewLocation) => void
   review: FileReviewNotes
+  mode: ReviewMode
+  onModeChange: (mode: ReviewMode) => void
+  onJumpToDiff: (path: string) => void
+  theme: ThemeMode
+  resolvedTheme: 'light' | 'dark'
+  onToggleTheme: () => { stored: ThemeMode; resolved: 'light' | 'dark' }
+  showHelp: boolean
+  onShowHelp: (open: boolean | ((v: boolean) => boolean)) => void
 }) {
+  const paneRef = useRef<HTMLDivElement>(null)
+  const isNarrow = useMediaQuery(narrowQuery)
+  const [sidebarOpen, setSidebarOpen] = useState(true)
+  const [drawerOpen, setDrawerOpen] = useState(() => !location?.path)
+  const treeOpen = isNarrow ? drawerOpen : sidebarOpen
+  const setTreeOpen = useCallback(
+    (open: boolean) => {
+      if (isNarrow) setDrawerOpen(open)
+      else setSidebarOpen(open)
+    },
+    [isNarrow],
+  )
+  const toggleTree = useCallback(() => setTreeOpen(!treeOpen), [setTreeOpen, treeOpen])
+  const focusSearchOnOpen = useRef(false)
+  useEffect(() => {
+    if (!treeOpen || !focusSearchOnOpen.current) return
+    focusSearchOnOpen.current = false
+    requestAnimationFrame(() => focusTreeSearch(paneRef.current ?? document))
+  }, [treeOpen])
+
+  const { toast, showToast } = useToast()
   const directory = useQuery({
     queryKey: ['repository-files'],
     queryFn: () => apiFetch<RepositoryFilesResponse>('api/repository-files'),
     refetchOnWindowFocus: false,
   })
+  // Subscribe to the cached diff without issuing a duplicate fetch, so the
+  // repository tree shows Git status, viewed checks, and Back-to-diff links.
+  const { data: diffData } = useQuery<DiffResponse>({
+    queryKey: ['diff'],
+    queryFn: () => apiFetch<DiffResponse>('api/diff'),
+    enabled: false,
+  })
+  const { repoTreeStatus, repoViewedFiles, diffFileSet } = useMemo(() => {
+    if (!diffData?.patch) {
+      return {
+        repoTreeStatus: emptyFileStatuses,
+        repoViewedFiles: emptyFileViewed,
+        diffFileSet: new Set<string>(),
+      }
+    }
+    const parsed = mergeDuplicateFiles(
+      parsePatchFiles(diffData.patch).flatMap((p) => p.files),
+    )
+    const status: GitStatusEntry[] = parsed.flatMap((f) => {
+      const s = REPO_TREE_STATUS[f.type]
+      return s && f.type !== 'deleted' ? [{ path: f.name, status: s }] : []
+    })
+    const viewedSet = new Set<string>()
+    for (const [fileName, hash] of Object.entries(diffData.fileHashes)) {
+      if (diffData.viewed[fileName] === hash) viewedSet.add(fileName)
+    }
+    const fileSet = new Set(parsed.filter((f) => f.type !== 'deleted').map((f) => f.name))
+    return { repoTreeStatus: status, repoViewedFiles: viewedSet, diffFileSet: fileSet }
+  }, [diffData])
+
   const path = location?.path
   const file = useQuery({
     queryKey: ['repository-file', path],
@@ -3701,11 +3967,6 @@ function FilesView({
     enabled: !!path,
     refetchOnWindowFocus: false,
   })
-  const { data: themeData } = useQuery({
-    queryKey: ['theme'],
-    queryFn: () => apiFetch<ThemeResponse>('api/theme'),
-    initialData: { theme: initialTheme },
-  })
   const paths = useMemo(
     () => directory.data?.paths.toSorted(compareTreeOrder) ?? emptyRepositoryPaths,
     [directory.data],
@@ -3714,75 +3975,155 @@ function FilesView({
     lines: [number, number]
     revision: string
     path: string
+    opened: number
   } | null>(null)
+  const draftTextRef = useRef('')
   const currentDraft =
     draft?.path === path && draft?.revision === file.data?.revision ? draft : null
-  const view = useRef<CodeViewHandle<FileReviewNote, undefined>>(null)
+  useEffect(() => {
+    if (!currentDraft) {
+      draftTextRef.current = ''
+      view.current?.getInstance()?.setSelectedLines(null)
+    }
+  }, [currentDraft])
+
+  const [staleNotesForPath, setStaleNotesForPath] = useState<string | null>(null)
+  const showStaleNotes = staleNotesForPath === path
+
+  const view = useRef<CodeViewHandle<FileAnnotationMeta, undefined>>(null)
+  const fileInstanceRef = useRef<ActiveLineTarget | null>(null)
   const snapshot = file.data
+  const snapshotContents = snapshot?.contents
+  const snapshotRevision = snapshot?.revision
   const fileId = snapshot ? `${snapshot.path}:${snapshot.revision}` : null
+  const lineCount = useMemo(() => {
+    if (!snapshotContents) return 0
+    const trimmed = snapshotContents.endsWith('\n')
+      ? snapshotContents.slice(0, -1)
+      : snapshotContents
+    return trimmed ? trimmed.split('\n').length : 0
+  }, [snapshotContents])
+
+  // Target line opened from Diff's "Open full file": scroll to it and mark it
+  // with the editor active-line highlight until another file or composer opens.
+  const [clearedActiveLocation, setClearedActiveLocation] =
+    useState<FileReviewLocation | null>(null)
+  const locationRef = useRef(location)
+  locationRef.current = location
+  const activeLine =
+    location?.line != null && clearedActiveLocation !== location ? location.line : null
+  const clampedActiveLine =
+    activeLine != null && lineCount > 0
+      ? Math.min(Math.max(1, activeLine), lineCount)
+      : null
+  const activeLineRef = useRef<number | null>(clampedActiveLine)
+  activeLineRef.current = clampedActiveLine
+  useEffect(() => {
+    fileInstanceRef.current?.setEditorActiveLine(clampedActiveLine)
+  }, [clampedActiveLine, fileId])
+
   const visibleNotes = useMemo(
     () =>
       review.notes.filter(
-        (note) => note.path === path && note.revision === snapshot?.revision,
+        (note) => note.path === path && note.revision === snapshotRevision,
       ),
-    [review.notes, path, snapshot?.revision],
+    [review.notes, path, snapshotRevision],
   )
-  const previousNoteVersion = useRef({ notes: visibleNotes, version: 0 })
-  if (previousNoteVersion.current.notes !== visibleNotes) {
-    previousNoteVersion.current = {
-      notes: visibleNotes,
-      version: previousNoteVersion.current.version + 1,
+  const staleNotes = useMemo(
+    () =>
+      review.notes.filter(
+        (note) =>
+          note.path === path && !!snapshotRevision && note.revision !== snapshotRevision,
+      ),
+    [review.notes, path, snapshotRevision],
+  )
+
+  const itemVersionRef = useRef({ key: '', version: 0 })
+  const itemKey = [
+    fileId ?? '',
+    visibleNotes
+      .map(
+        (note) =>
+          `${note.id}@${note.lines[1]}:${note.pending ? 1 : 0}:${note.status}:${note.error ?? ''}`,
+      )
+      .join(','),
+    currentDraft
+      ? `${currentDraft.lines[0]}-${currentDraft.lines[1]}:${currentDraft.opened}`
+      : '',
+  ].join('|')
+  if (itemVersionRef.current.key !== itemKey) {
+    itemVersionRef.current = {
+      key: itemKey,
+      version: itemVersionRef.current.version + 1,
     }
   }
-  const version = previousNoteVersion.current.version
-  const items = useMemo<CodeViewFileItem<FileReviewNote>[]>(
-    () =>
-      !snapshot || !fileId || !snapshot.contents
-        ? []
-        : [
-            {
-              id: fileId,
-              type: 'file',
-              file: { name: snapshot.path, contents: snapshot.contents, cacheKey: fileId },
-              annotations: visibleNotes.map((note) => ({
-                lineNumber: note.lines[1],
-                metadata: note,
-              })),
-              version,
-            },
-          ],
-    [fileId, snapshot, version, visibleNotes],
-  )
-  const ref = useRef(snapshot)
-  ref.current = snapshot
-  const options = useMemo<CodeViewOptions<FileReviewNote, undefined>>(
+  const version = itemVersionRef.current.version
+
+  const items = useMemo<CodeViewFileItem<FileAnnotationMeta>[]>(() => {
+    if (!snapshot || !fileId || !snapshot.contents) return []
+    const annotations: LineAnnotation<FileAnnotationMeta>[] = visibleNotes.map((note) => ({
+      lineNumber: note.lines[1],
+      metadata: { type: 'note', note },
+    }))
+    if (currentDraft) {
+      annotations.push({
+        lineNumber: currentDraft.lines[1],
+        metadata: { type: 'composing', lines: currentDraft.lines },
+      })
+    }
+    return [
+      {
+        id: fileId,
+        type: 'file',
+        file: { name: snapshot.path, contents: snapshot.contents, cacheKey: fileId },
+        annotations,
+        version,
+      },
+    ]
+  }, [fileId, snapshot, version, visibleNotes, currentDraft])
+
+  const snapshotRef = useRef(snapshot)
+  snapshotRef.current = snapshot
+  const options = useMemo<CodeViewOptions<FileAnnotationMeta, undefined>>(
     () => ({
       theme: DIFF_THEME,
-      themeType: themeData.theme,
+      themeType: theme,
       preferredHighlighter: HIGHLIGHTER,
       overflow: 'wrap',
+      disableFileHeader: true,
+      itemMetrics: { paddingBottom: 0 },
       enableGutterUtility: true,
       enableLineSelection: true,
       layout: { paddingTop: 0, paddingBottom: 8, gap: 8 },
+      searchOptions: { disableShortcuts: true },
+      unsafeCSS: DIFF_CSS,
       onGutterUtilityClick: (range) => {
-        const current = ref.current
+        const current = snapshotRef.current
         if (!current) return
-        setDraft({
+        draftTextRef.current = ''
+        setClearedActiveLocation(locationRef.current)
+        setDraft((prev) => ({
           lines: [Math.min(range.start, range.end), Math.max(range.start, range.end)],
           path: current.path,
           revision: current.revision,
-        })
+          opened: (prev?.opened ?? 0) + 1,
+        }))
+      },
+      onPostRender: (_node, instance, phase) => {
+        if (phase === 'unmount') {
+          if (fileInstanceRef.current === instance) fileInstanceRef.current = null
+          return
+        }
+        fileInstanceRef.current = instance
+        instance.setEditorActiveLine(activeLineRef.current)
       },
     }),
-    [themeData.theme],
+    [theme],
   )
 
   useEffect(() => {
-    if (!fileId || !location?.line || !snapshot?.contents) return
-    const lineNumber = Math.min(
-      location.line,
-      snapshot.contents.trimEnd().split('\n').length,
-    )
+    if (!fileId || !location?.line || lineCount === 0) return
+    const lineNumber = Math.min(Math.max(1, location.line), lineCount)
     const tick = requestAnimationFrame(() =>
       view.current?.getInstance()?.scrollTo({
         type: 'line',
@@ -3792,176 +4133,500 @@ function FilesView({
       }),
     )
     return () => cancelAnimationFrame(tick)
-  }, [fileId, location?.line, snapshot?.contents])
+  }, [fileId, location?.line, lineCount])
 
-  const save = (text: string, choices?: OrcaChoice[], send = false) => {
-    if (!currentDraft) return
-    const body = { ...currentDraft, text }
-    if (choices) {
-      for (const { id, kind, label } of choices)
-        review.add({ ...body, target: { id, kind } }, label, true)
-    } else {
-      review.add(body, send ? 'External command' : '', send)
+  const save = useCallback(
+    (text: string, choices?: OrcaChoice[], send = false) => {
+      if (!currentDraft) return
+      const body = {
+        path: currentDraft.path,
+        revision: currentDraft.revision,
+        lines: currentDraft.lines,
+        text,
+      }
+      if (choices) {
+        for (const { id, kind, label } of choices)
+          review.add({ ...body, target: { id, kind } }, label, true)
+      } else {
+        review.add(body, send ? 'External command' : '', send)
+      }
+      setDraft(null)
+      view.current?.getInstance()?.setSelectedLines(null)
+    },
+    [currentDraft, review],
+  )
+
+  const canSendRepo = directory.data?.send ?? false
+  const canOrcaRepo = directory.data?.orca ?? false
+  const currentDraftOpened = currentDraft?.opened
+
+  const renderAnnotation = useCallback(
+    (
+      annotation:
+        | LineAnnotation<FileAnnotationMeta>
+        | DiffLineAnnotation<FileAnnotationMeta>,
+      _fileOrDiff: unknown,
+      _item: CodeViewItem<FileAnnotationMeta>,
+    ) => {
+      const meta = annotation.metadata
+      if (!meta) return null
+      if (meta.type === 'composing') {
+        return (
+          <div className="repo-inline-composer">
+            <div className="repo-inline-composer-head">
+              {meta.lines[0] === meta.lines[1]
+                ? `Line ${meta.lines[0]}`
+                : `Lines ${meta.lines.join('–')}`}
+            </div>
+            <CommentForm
+              key={currentDraftOpened ?? meta.lines.join(':')}
+              copy={null}
+              initialText={draftTextRef.current}
+              onTextChange={(value) => {
+                draftTextRef.current = value
+              }}
+              onSubmit={save}
+              localNote
+              onSend={
+                canSendRepo && !canOrcaRepo
+                  ? (text) => save(text, undefined, true)
+                  : undefined
+              }
+              onOrcaSend={canOrcaRepo ? save : undefined}
+              inlineUnavailable={null}
+              onCancel={() => setDraft(null)}
+              submitting={false}
+              error={null}
+              syntax={null}
+            />
+          </div>
+        )
+      }
+      const { note } = meta
+      return (
+        <div className="sent-comment">
+          <div className="sent-comment-head">
+            <span className="sent-comment-label" role="status">
+              {note.status}
+              {note.label ? ` · ${note.label}` : ''}
+            </span>
+            <button
+              className="sent-comment-dismiss"
+              type="button"
+              aria-label="Dismiss"
+              title="Dismiss"
+              disabled={note.pending}
+              onClick={() => review.dismiss(note.id)}
+            >
+              ×
+            </button>
+          </div>
+          <div className="sent-comment-text">{note.text}</div>
+          {note.error && (
+            <div role="alert" className="comment-form-error">
+              {note.error}
+            </div>
+          )}
+        </div>
+      )
+    },
+    [currentDraftOpened, canOrcaRepo, canSendRepo, review, save],
+  )
+
+  useEffect(() => {
+    const scopeRoot = () => paneRef.current ?? document
+    function handler(e: KeyboardEvent) {
+      if (e.key === 'k' && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
+        e.preventDefault()
+        if (!focusTreeSearch(scopeRoot())) {
+          focusSearchOnOpen.current = true
+          setTreeOpen(true)
+        }
+        return
+      }
+      if (
+        !e.defaultPrevented &&
+        (e.key === 'f' || e.key === 'F') &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        !showHelp &&
+        view.current
+      ) {
+        e.preventDefault()
+        view.current.openSearch()
+        return
+      }
+      if (
+        !e.defaultPrevented &&
+        (e.key === 'g' || e.key === 'G') &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !showHelp &&
+        view.current?.isSearchOpen()
+      ) {
+        e.preventDefault()
+        view.current.navigateSearch(e.shiftKey ? 'previous' : 'next')
+        return
+      }
+      const origin = e.composedPath()[0]
+      if (origin instanceof HTMLTextAreaElement || origin instanceof HTMLInputElement)
+        return
+      if (e.ctrlKey || e.metaKey || e.altKey) return
+
+      switch (e.key) {
+        case '?':
+          e.preventDefault()
+          onShowHelp((v) => !v)
+          break
+        case 'Escape':
+          if (showHelp) {
+            e.preventDefault()
+            onShowHelp(false)
+          } else if (currentDraft) {
+            e.preventDefault()
+            setDraft(null)
+          } else if (isNarrow && treeOpen) {
+            e.preventDefault()
+            setTreeOpen(false)
+          } else if (view.current?.isSearchOpen()) {
+            e.preventDefault()
+            view.current.closeSearch()
+          }
+          break
+        case 'b':
+          if (showHelp || currentDraft) break
+          e.preventDefault()
+          toggleTree()
+          break
+        case 't': {
+          if (showHelp || currentDraft) break
+          e.preventDefault()
+          const { stored, resolved } = onToggleTheme()
+          showToast(
+            <>
+              Theme: <code>{resolved}</code>
+              {stored === 'system' ? ' (following system)' : null}
+            </>,
+          )
+          break
+        }
+      }
     }
-    setDraft(null)
-    view.current?.getInstance()?.setSelectedLines(null)
-  }
+
+    function captureKeyDown(e: KeyboardEvent) {
+      if (e.isComposing || e.keyCode === 229) return
+      const eventPath = e.composedPath()
+      if (e.key === 'Escape' && eventPath[0] === treeSearchInput(scopeRoot())) {
+        const code = scopeRoot().querySelector<HTMLElement>('.repo-codeview')
+        if (code) code.focus({ preventScroll: true })
+        else treeSearchInput(scopeRoot())?.blur()
+        return
+      }
+      if (
+        e.key === 'Escape' &&
+        !e.defaultPrevented &&
+        currentDraft &&
+        eventPath.some((n) => n instanceof Element && n.matches('.comment-form'))
+      ) {
+        e.preventDefault()
+        e.stopPropagation()
+        setDraft(null)
+        return
+      }
+      if (
+        !e.defaultPrevented &&
+        (e.key === 'f' || e.key === 'F') &&
+        (e.metaKey || e.ctrlKey) &&
+        !e.altKey &&
+        !e.shiftKey &&
+        eventPath[0] instanceof HTMLInputElement &&
+        'search' in eventPath[0].dataset &&
+        eventPath.some((n) => n instanceof Element && n.matches('[data-search-panel]'))
+      ) {
+        e.stopPropagation()
+        view.current?.closeSearch()
+      }
+    }
+
+    window.addEventListener('keydown', captureKeyDown, true)
+    window.addEventListener('keydown', handler)
+    return () => {
+      window.removeEventListener('keydown', captureKeyDown, true)
+      window.removeEventListener('keydown', handler)
+    }
+  }, [
+    showHelp,
+    onShowHelp,
+    currentDraft,
+    isNarrow,
+    treeOpen,
+    setTreeOpen,
+    toggleTree,
+    onToggleTheme,
+    showToast,
+  ])
 
   return (
-    <div className="repo-browser">
-      <div className="repo-browser-tree">
-        <div className="repo-toolbar">
-          <strong>Repository files</strong>
-          <Button variant="ghost" onClick={() => void directory.refetch()}>
-            Refresh files
-          </Button>
-        </div>
-        {directory.error ? (
-          <p role="alert">{directory.error.message}</p>
-        ) : directory.isPending ? (
-          <p>Loading files…</p>
-        ) : paths.length ? (
-          <FileTreePanel
-            paths={paths}
-            gitStatus={emptyFileStatuses}
-            viewed={emptyFileViewed}
-            focusedFile={path ?? null}
-            startCollapsed
-            onSelectFile={(selected) => {
-              if (path !== selected) setDraft(null)
-              onLocation({ path: selected })
-            }}
-          />
-        ) : (
-          <p>No reviewable files in this checkout.</p>
-        )}
-      </div>
-      <div className="repo-browser-content">
-        {path && (
-          <div className="repo-toolbar">
-            <strong title={path}>{path}</strong>
-            <Button
-              variant="ghost"
-              disabled={file.isFetching}
-              onClick={() => void file.refetch()}
-            >
-              Refresh file
-            </Button>
+    <div className="diff-container files-container" ref={paneRef}>
+      <div className="header-row">
+        <ProgressBar
+          treeOpen={treeOpen}
+          onToggleTree={toggleTree}
+          mode={mode}
+          onModeChange={onModeChange}
+          command={diffData?.revset || diffData?.repo}
+          resolvedTheme={resolvedTheme}
+          onToggleTheme={onToggleTheme}
+          onShowHelp={() => onShowHelp(true)}
+        />
+        {toast && (
+          <div
+            className="toast"
+            key={toast.key}
+            style={{ animationDuration: `${toast.ms}ms` }}
+          >
+            {toast.content}
           </div>
         )}
-        {!path ? (
-          <div className="empty-diff">Select a file to read or review it.</div>
-        ) : file.isPending ? (
-          <div className="empty-diff">Loading file…</div>
-        ) : file.error ? (
-          <p className="repo-file-message" role="alert">
-            {file.error.message}
-          </p>
-        ) : !snapshot?.contents ? (
-          <div className="empty-diff">This file is empty.</div>
-        ) : (
-          <>
-            {currentDraft && (
-              <div className="repo-file-composer">
-                <strong>
-                  {currentDraft.lines[0] === currentDraft.lines[1]
-                    ? `Review line ${currentDraft.lines[0]}`
-                    : `Review lines ${currentDraft.lines.join('–')}`}
-                </strong>
-                <CommentForm
-                  key={currentDraft.lines.join(':')}
-                  copy={null}
-                  initialText=""
-                  onTextChange={() => {}}
-                  onSubmit={save}
-                  localNote
-                  onSend={
-                    directory.data?.send && !directory.data.orca
-                      ? (text) => save(text, undefined, true)
-                      : undefined
-                  }
-                  onOrcaSend={directory.data?.orca ? save : undefined}
-                  inlineUnavailable={null}
-                  onCancel={() => setDraft(null)}
-                  submitting={false}
-                  error={null}
-                  syntax={null}
-                />
-              </div>
+      </div>
+      <div
+        className="repo-browser"
+        style={
+          {
+            '--diffs-tab-size': String(directory.data?.tabSize ?? DEFAULT_TAB_SIZE),
+          } as CSSProperties
+        }
+        onPointerDownCapture={(e) => {
+          if (e.button !== 0 || !(e.target instanceof Element)) return
+          const code = e.target.closest<HTMLElement>('.repo-codeview')
+          if (code && !code.contains(document.activeElement)) {
+            code.focus({ preventScroll: true })
+          }
+        }}
+      >
+        {treeOpen && (
+          <div className="repo-browser-tree">
+            <div className="repo-toolbar">
+              <span className="repo-toolbar-title">Repository files</span>
+              <button
+                type="button"
+                className="repo-toolbar-ghost"
+                disabled={directory.isFetching}
+                onClick={() => void directory.refetch()}
+              >
+                Refresh files
+              </button>
+            </div>
+            {directory.error ? (
+              <p role="alert">{directory.error.message}</p>
+            ) : directory.isPending ? (
+              <p>Loading files…</p>
+            ) : paths.length ? (
+              <FileTreePanel
+                paths={paths}
+                gitStatus={repoTreeStatus}
+                viewed={repoViewedFiles}
+                focusedFile={path ?? null}
+                startCollapsed
+                onSelectFile={(selected) => {
+                  if (path !== selected) setDraft(null)
+                  onLocation({ path: selected })
+                  setDrawerOpen(false)
+                }}
+              />
+            ) : (
+              <p>No reviewable files in this checkout.</p>
             )}
+          </div>
+        )}
+        {isNarrow && treeOpen && (
+          <div className="file-tree-backdrop" onClick={() => setTreeOpen(false)} />
+        )}
+        <div className="repo-browser-content">
+          {path && (
+            <div className="repo-toolbar repo-file-header">
+              <span className="file-header-name" title={path}>
+                <span className="file-header-path">{path}</span>
+              </span>
+              <CopyPathButton path={path} />
+              {lineCount > 0 && (
+                <span className="repo-line-count">
+                  {lineCount} {lineCount === 1 ? 'line' : 'lines'}
+                </span>
+              )}
+              <div className="repo-toolbar-actions">
+                {diffFileSet.has(path) && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary repo-toolbar-action"
+                    onClick={() => onJumpToDiff(path)}
+                  >
+                    View in diff
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="repo-toolbar-ghost"
+                  disabled={file.isFetching}
+                  onClick={() => void file.refetch()}
+                >
+                  Refresh file
+                </button>
+              </div>
+            </div>
+          )}
+          {staleNotes.length > 0 && (
+            <div className="repo-stale-notes" role="status">
+              <div className="repo-stale-notes-bar">
+                <span>
+                  {staleNotes.length} {staleNotes.length === 1 ? 'note' : 'notes'} from an
+                  earlier revision of this file
+                </span>
+                <div className="repo-stale-notes-actions">
+                  <button
+                    type="button"
+                    className="repo-toolbar-ghost"
+                    onClick={() =>
+                      setStaleNotesForPath((prev) =>
+                        prev === path ? null : (path ?? null),
+                      )
+                    }
+                  >
+                    {showStaleNotes ? 'Hide' : 'Show'}
+                  </button>
+                  <button
+                    type="button"
+                    className="repo-toolbar-ghost"
+                    onClick={() => {
+                      for (const note of staleNotes) {
+                        if (!note.pending) review.dismiss(note.id)
+                      }
+                    }}
+                  >
+                    Dismiss all
+                  </button>
+                </div>
+              </div>
+              {showStaleNotes && (
+                <div className="repo-stale-notes-list">
+                  {staleNotes.map((note) => (
+                    <div key={note.id} className="sent-comment">
+                      <div className="sent-comment-head">
+                        <span className="sent-comment-label">
+                          {note.lines[0] === note.lines[1]
+                            ? `Line ${note.lines[0]}`
+                            : `Lines ${note.lines.join('–')}`}{' '}
+                          · {note.status}
+                          {note.label ? ` · ${note.label}` : ''}
+                        </span>
+                        <button
+                          className="sent-comment-dismiss"
+                          type="button"
+                          aria-label="Dismiss"
+                          title="Dismiss"
+                          disabled={note.pending}
+                          onClick={() => review.dismiss(note.id)}
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <div className="sent-comment-text">{note.text}</div>
+                      {note.error && (
+                        <div role="alert" className="comment-form-error">
+                          {note.error}
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
+          {!path ? (
+            <div className="empty-diff">Select a file to read or review it.</div>
+          ) : file.isPending ? (
+            <div className="empty-diff">Loading file…</div>
+          ) : file.error ? (
+            <p className="repo-file-message" role="alert">
+              {file.error.message}
+            </p>
+          ) : !snapshot?.contents ? (
+            <div className="empty-diff">This file is empty.</div>
+          ) : (
             <CodeView
               key={fileId}
               ref={view}
               className="codeview-root repo-codeview"
               items={items}
               options={options}
-              renderAnnotation={({ metadata: note }, _file, _item) => (
-                <div className="sent-comment">
-                  <div className="sent-comment-head">
-                    <span role="status">
-                      {note.status}
-                      {note.label ? ` · ${note.label}` : ''}
-                    </span>
-                    <button
-                      className="sent-comment-dismiss"
-                      type="button"
-                      aria-label="Dismiss"
-                      disabled={note.pending}
-                      onClick={() => review.dismiss(note.id)}
-                    >
-                      ×
-                    </button>
-                  </div>
-                  <div className="sent-comment-text">{note.text}</div>
-                  {note.error && (
-                    <div role="alert" className="comment-form-error">
-                      {note.error}
-                    </div>
-                  )}
-                </div>
-              )}
+              renderAnnotation={renderAnnotation}
             />
-          </>
-        )}
+          )}
+        </div>
       </div>
     </div>
   )
 }
 
 function ReviewWorkspace() {
-  const [mode, setMode] = useState<'diff' | 'files'>('diff')
+  const [mode, setMode] = useState<ReviewMode>('diff')
   const [location, setLocation] = useState<FileReviewLocation | null>(null)
+  const [diffJump, setDiffJump] = useState<{ path: string; seq: number } | null>(null)
+  const jumpSeqRef = useRef(0)
+  const [showHelp, setShowHelp] = useState(false)
+  const diffPaneRef = useRef<HTMLDivElement>(null)
   const review = useFileReviewNotes()
+  const { theme, resolvedTheme, toggleTheme } = useAppTheme()
+  const { data: diffData } = useQuery<DiffResponse>({
+    queryKey: ['diff'],
+    queryFn: () => apiFetch<DiffResponse>('api/diff'),
+    enabled: false,
+  })
   const openFile = useCallback((path: string, line?: number) => {
     setLocation({ path, line })
     setMode('files')
   }, [])
+  const jumpToDiff = useCallback((path: string) => {
+    setDiffJump({ path, seq: ++jumpSeqRef.current })
+    setMode('diff')
+  }, [])
+  const clearDiffJump = useCallback(() => setDiffJump(null), [])
   return (
     <>
+      <div className="workspace-pane" ref={diffPaneRef} hidden={mode !== 'diff'}>
+        <DiffView
+          active={mode === 'diff'}
+          paneRef={diffPaneRef}
+          mode={mode}
+          onModeChange={setMode}
+          onOpenFile={openFile}
+          theme={theme}
+          resolvedTheme={resolvedTheme}
+          onToggleTheme={toggleTheme}
+          showHelp={showHelp}
+          onShowHelp={setShowHelp}
+          jumpToFile={diffJump}
+          onJumpHandled={clearDiffJump}
+        />
+      </div>
       {mode === 'files' && (
-        <nav className="review-modes" aria-label="Review mode">
-          <button
-            type="button"
-            className="btn"
-            aria-pressed="false"
-            onClick={() => setMode('diff')}
-          >
-            Diff
-          </button>
-          <button
-            type="button"
-            className="btn"
-            aria-pressed="true"
-            onClick={() => setMode('files')}
-          >
-            Files
-          </button>
-        </nav>
+        <FilesView
+          location={location}
+          onLocation={setLocation}
+          review={review}
+          mode={mode}
+          onModeChange={setMode}
+          onJumpToDiff={jumpToDiff}
+          theme={theme}
+          resolvedTheme={resolvedTheme}
+          onToggleTheme={toggleTheme}
+          showHelp={showHelp}
+          onShowHelp={setShowHelp}
+        />
       )}
-      {mode === 'diff' ? (
-        <DiffView onOpenFile={openFile} onBrowseFiles={() => setMode('files')} />
-      ) : (
-        <FilesView location={location} onLocation={setLocation} review={review} />
+      {showHelp && (
+        <HelpModal send={diffData?.send ?? false} onClose={() => setShowHelp(false)} />
       )}
     </>
   )

@@ -128,6 +128,12 @@ test('routes line comments to existing and new Orca agents without blocking anot
 }) => {
   await clickLine(page, 0)
   await expect(page.getByText('Orca · Review workspace')).toBeVisible()
+  await expect(
+    page.locator('.orca-chip .orca-chip-title', { hasText: 'Existing Codex' }),
+  ).toBeVisible()
+  await expect(
+    page.locator('.orca-chip .orca-chip-meta', { hasText: 'codex · working' }),
+  ).toBeVisible()
   await expect(page.getByText('Other worktree')).toHaveCount(0)
   await expect(page.getByText('Other host')).toHaveCount(0)
   await expect(page.getByText('Sleeping agent')).toHaveCount(0)
@@ -150,6 +156,13 @@ test('routes line comments to existing and new Orca agents without blocking anot
   await expect(page.getByText(/Accepted by Orca · Existing Codex/)).toBeVisible()
   await expect(page.getByText(/Delivery not confirmed · Existing Agy/)).toBeVisible()
   await expect(page.getByText(/fixture_refusal/)).toBeVisible()
+
+  // Switching to Files and back to Diff keeps all sent Orca cards intact.
+  await page.getByRole('button', { name: 'Files', exact: true }).click()
+  await expect(page.getByText('Repository files')).toBeVisible()
+  await page.getByRole('button', { name: 'Diff', exact: true }).click()
+  await expect(page.getByText(/Accepted by Orca · Existing Codex/)).toBeVisible()
+  await expect(page.getByText(/Started in Orca · Claude Code/)).toBeVisible()
   const log = await commands(review.dir)
   expect(log.filter((cmd) => cmd[1] === 'create')).toHaveLength(1)
   const sends = log.filter((cmd) => cmd[1] === 'send')

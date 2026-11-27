@@ -188,7 +188,17 @@ export function createOrcaBridge(root: string, run: Run = orcaRunner(root)) {
     const matches = listed.agents.filter(
       (row) => row.orcaSessionId && inScope(row, current),
     )
-    const entries = new Map<string, { address: string; label: string }>()
+    const entries = new Map<
+      string,
+      {
+        address: string
+        label: string
+        title: string
+        agent: string
+        kind: 'chat' | 'terminal'
+        state: string
+      }
+    >()
     const visibleTerminals = matches.some((row) => row.kind === 'terminal')
       ? await listTerminals(current)
       : []
@@ -211,11 +221,18 @@ export function createOrcaBridge(root: string, run: Run = orcaRunner(root)) {
       }
       if (seen.has(session)) ambiguous.add(session)
       seen.add(session)
-      if (address)
+      if (address) {
+        const title = row.title || row.agent || 'Agent'
+        const agent = row.agent ?? row.kind
         entries.set(session, {
           address,
-          label: `${row.title || row.agent || 'Agent'} · ${row.agent ?? row.kind} · ${row.state}`,
+          label: `${title} · ${agent} · ${row.state}`,
+          title,
+          agent,
+          kind: row.kind,
+          state: row.state,
         })
+      }
     }
     for (const session of ambiguous) entries.delete(session)
     return { entries, truncated: !!listed.truncated }
@@ -233,7 +250,14 @@ export function createOrcaBridge(root: string, run: Run = orcaRunner(root)) {
     const [open, fresh] = await Promise.all([existing(current), available(current)])
     return {
       workspace: current.displayName,
-      existing: [...open.entries].map(([id, { label }]) => ({ id, label })),
+      existing: [...open.entries].map(([id, { label, title, agent, kind, state }]) => ({
+        id,
+        label,
+        title,
+        agent,
+        kind,
+        state,
+      })),
       fresh: fresh.map(({ id, name }) => ({ id, label: name })),
       truncated: open.truncated,
     }

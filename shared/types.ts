@@ -79,9 +79,18 @@ export const orcaRequestSchema = sendRequestSchema.extend({
 
 export type OrcaTarget = z.infer<typeof orcaRequestSchema>['target']
 
+export interface OrcaExistingTarget {
+  id: string
+  label: string
+  title?: string
+  agent?: string
+  kind?: 'chat' | 'terminal'
+  state?: string
+}
+
 export interface OrcaTargetsResponse {
   workspace: string
-  existing: { id: string; label: string }[]
+  existing: OrcaExistingTarget[]
   fresh: { id: string; label: string }[]
   truncated: boolean
 }

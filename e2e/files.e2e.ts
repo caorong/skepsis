@@ -72,6 +72,93 @@ test('a changed file opens in Files with full context', async ({ page }) => {
   )
   await expect(page.locator('.repo-codeview')).toContainText('const one = 1')
   await expect(page.locator('.repo-codeview')).toContainText('const four = 4')
+  // Target line from the diff hunk is highlighted in the full file view.
+  await expect(
+    page.locator('.repo-codeview [data-editor-active-line]').first(),
+  ).toHaveAttribute('data-column-number', '2')
+  // View in diff returns to Diff mode focused on that file.
+  await page.getByRole('button', { name: 'View in diff', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Diff', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await expect(page.locator('.file-header.focused .file-header-name')).toHaveText('a.ts')
+})
+
+test('switching Diff and Files preserves Diff state and keeps unified top bar controls', async ({
+  page,
+  repo,
+}) => {
+  // Collapse a.ts and focus b.txt in Diff view.
+  await page
+    .locator('.file-header', { hasText: 'a.ts' })
+    .locator('.collapse-chevron')
+    .click()
+  await expect(
+    page.locator('.file-header', { hasText: 'a.ts' }).locator('.collapse-chevron'),
+  ).toHaveClass(/collapsed/)
+  await page.keyboard.press('n')
+  await expect(page.locator('.file-header.focused .file-header-name')).toHaveText('b.txt')
+
+  // Switch to Files: unified top bar provides theme toggle, help, and sidebar toggle.
+  await openFiles(page)
+  await expect(page.getByRole('button', { name: 'Diff', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'false',
+  )
+  await expect(page.getByRole('button', { name: 'Files', exact: true })).toHaveAttribute(
+    'aria-pressed',
+    'true',
+  )
+  await page.getByRole('button', { name: 'Keyboard shortcuts' }).click()
+  await expect(page.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.getByRole('heading', { name: 'Keyboard Shortcuts' })).toBeHidden()
+
+  // Cmd/Ctrl+K focuses tree search; b hides/shows tree.
+  await page.keyboard.press('ControlOrMeta+k')
+  await expect(page.locator('.repo-browser-tree .file-tree input')).toBeFocused()
+  await page.keyboard.press('Escape')
+  await page.keyboard.press('b')
+  await expect(page.locator('.repo-browser-tree')).toBeHidden()
+  await page.keyboard.press('b')
+  await expect(page.locator('.repo-browser-tree')).toBeVisible()
+
+  // Inline composer renders inside .repo-codeview, supports Escape, and Cmd/Ctrl+F searches.
+  await page.getByRole('treeitem', { name: 'long.ts' }).click()
+  await expect(page.locator('.repo-codeview')).toContainText('// line 1')
+  await page.keyboard.press('ControlOrMeta+f')
+  const findInput = page.locator('.repo-codeview [data-search-panel] input[data-search]')
+  await expect(findInput).toBeFocused()
+  await findInput.pressSequentially('line 42')
+  await expect(
+    page.locator('.repo-codeview [data-search-panel] [data-matches]'),
+  ).toHaveText('1/1')
+  await page.keyboard.press('Escape')
+  await expect(findInput).toHaveCount(0)
+
+  await openReview(page, 3)
+  await expect(page.locator('.repo-codeview .repo-inline-composer')).toBeVisible()
+  await page.keyboard.press('Escape')
+  await expect(page.locator('.repo-codeview .repo-inline-composer')).toHaveCount(0)
+
+  // Save a note, modify the file on disk, and refresh: earlier-revision note is surfaced.
+  await openReview(page, 3)
+  await page.getByPlaceholder('Leave a review comment').fill('Old revision note')
+  await page.getByRole('button', { name: 'Save note' }).click()
+  await expect(page.getByText('Old revision note')).toBeVisible()
+  await repo.write('long.ts', '// edited line 1\n' + (await repo.read('long.ts')))
+  await page.getByRole('button', { name: 'Refresh file', exact: true }).click()
+  await expect(page.getByText('1 note from an earlier revision of this file')).toBeVisible()
+  await page.getByRole('button', { name: 'Show', exact: true }).click()
+  await expect(page.getByText('Old revision note')).toBeVisible()
+
+  // Switch back to Diff: a.ts stays collapsed and b.txt stays focused.
+  await page.getByRole('button', { name: 'Diff', exact: true }).click()
+  await expect(
+    page.locator('.file-header', { hasText: 'a.ts' }).locator('.collapse-chevron'),
+  ).toHaveClass(/collapsed/)
+  await expect(page.locator('.file-header.focused .file-header-name')).toHaveText('b.txt')
 })
 
 test.describe('review delivery', () => {
