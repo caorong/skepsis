@@ -52,6 +52,8 @@ import type {
   DiffHashResponse,
   DiffResponse,
   SendRequest,
+  OrcaTarget,
+  OrcaTargetsResponse,
   ErrorResponse,
   FileContentsResponse,
   ThemeMode,
@@ -259,6 +261,7 @@ type SentComment = {
   lines: [number, number]
   quote: string | null
   text: string
+  delivery?: { label: string; status: string; error?: string; pending?: boolean }
 }
 
 /** A comment box opened by selecting text. `columns` is null when the
@@ -801,12 +804,58 @@ function lineContext(
 const marker = ({ prefix, suffix }: CommentSyntax) =>
   suffix ? `${prefix} ${suffix}` : prefix
 
+type OrcaChoice = OrcaTarget & { label: string }
+const orcaChoiceKey = ({ kind, id }: OrcaChoice) => `${kind}:${id}`
+
+function OrcaChoiceGroup({
+  title,
+  items,
+  empty,
+  selected,
+  onChange,
+}: {
+  title: string
+  items: OrcaChoice[]
+  empty: string
+  selected: string[]
+  onChange: (values: string[]) => void
+}) {
+  return (
+    <fieldset className="orca-choices">
+      <legend>{title}</legend>
+      {items.length === 0 && <span>{empty}</span>}
+      {items.map((item) => {
+        const key = orcaChoiceKey(item)
+        const checked = selected.includes(key)
+        return (
+          <label key={key}>
+            <input
+              type="checkbox"
+              checked={checked}
+              disabled={!checked && selected.length >= 8}
+              onChange={(e) =>
+                onChange(
+                  e.target.checked
+                    ? [...selected, key]
+                    : selected.filter((value) => value !== key),
+                )
+              }
+            />
+            {item.label}
+          </label>
+        )
+      })}
+    </fieldset>
+  )
+}
+
 function CommentForm({
   copy,
   initialText,
   onTextChange,
   onSubmit,
   onSend,
+  onOrcaSend,
   inlineUnavailable,
   onCancel,
   submitting,
@@ -825,6 +874,7 @@ function CommentForm({
   /** With --send: send to the command. Then the submit keys send and the
    *  inline keys write a marker. */
   onSend?: (text: string) => void
+  onOrcaSend?: (text: string, choices: OrcaChoice[]) => void
   /** Why a marker can't be written here, if it can't */
   inlineUnavailable: string | null
   onCancel: () => void
@@ -835,6 +885,35 @@ function CommentForm({
   syntax: FileCommentSyntax
 }) {
   const [text, setText] = useState(initialText)
+  const [selected, setSelected] = useState<string[]>([])
+  const orca = useQuery({
+    queryKey: ['orca-targets'],
+    queryFn: () => apiFetch<OrcaTargetsResponse>('api/orca/targets'),
+    enabled: !!onOrcaSend,
+    staleTime: 5_000,
+    retry: false,
+    refetchOnWindowFocus: false,
+  })
+  const existing: OrcaChoice[] = (orca.data?.existing ?? []).map((row) => ({
+    id: row.id,
+    label: row.label,
+    kind: 'existing',
+  }))
+  const fresh: OrcaChoice[] = (orca.data?.fresh ?? []).map((row) => ({
+    id: row.id,
+    label: row.label,
+    kind: 'new',
+  }))
+  const picks =
+    orca.isError || orca.isFetching
+      ? []
+      : [...existing, ...fresh].filter((item) => selected.includes(orcaChoiceKey(item)))
+  const sendAction = onOrcaSend
+    ? picks.length > 0
+      ? (body: string) => onOrcaSend(body, picks)
+      : undefined
+    : onSend
+  const hasSend = !!(onSend || onOrcaSend)
   // useEffect instead of a function ref because the function ref didn't
   // actually focus the textarea on open.
   const ref = useRef<HTMLTextAreaElement>(null)
@@ -866,16 +945,55 @@ function CommentForm({
           }
           if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
             e.preventDefault()
-            run(onSend ? (e.altKey ? inline : onSend) : onSubmit)
+            run(hasSend ? (e.altKey ? inline : sendAction) : onSubmit)
           }
           if (e.key === 'Escape') onCancel()
         }}
         placeholder={`Leave a review comment... (${
-          onSend ? `${SUBMIT_KEYS} sends` : `${SUBMIT_KEYS} to submit`
+          hasSend ? `${SUBMIT_KEYS} sends` : `${SUBMIT_KEYS} to submit`
         })`}
         rows={3}
         disabled={submitting}
       />
+      {onOrcaSend && (
+        <div className="orca-picker">
+          <div className="orca-picker-head">
+            <strong>Orca{orca.data ? ` · ${orca.data.workspace}` : ''}</strong>
+            <Button
+              variant="ghost"
+              disabled={orca.isFetching}
+              onClick={() => void orca.refetch()}
+            >
+              Refresh agents
+            </Button>
+          </div>
+          {orca.isFetching ? (
+            <div role="status">Loading agents…</div>
+          ) : orca.error ? (
+            <div role="alert" className="comment-form-error">
+              {orca.error.message}
+            </div>
+          ) : (
+            <>
+              {orca.data?.truncated && <div>Orca returned a partial list.</div>}
+              <OrcaChoiceGroup
+                title="Existing agents · reuse context"
+                items={existing}
+                empty="No open agents in this worktree."
+                selected={selected}
+                onChange={setSelected}
+              />
+              <OrcaChoiceGroup
+                title="Start a new agent"
+                items={fresh}
+                empty="No enabled agents were found."
+                selected={selected}
+                onChange={setSelected}
+              />
+            </>
+          )}
+        </div>
+      )}
       <div className="comment-form-actions">
         <div className="comment-form-note">
           {/* The marker only matters to an inline comment, so where there
@@ -907,7 +1025,7 @@ function CommentForm({
           <Button variant="ghost" onClick={onCancel} disabled={submitting}>
             Cancel
           </Button>
-          {onSend ? (
+          {hasSend ? (
             <>
               <Button
                 disabled={!text.trim() || submitting || !inline}
@@ -918,11 +1036,19 @@ function CommentForm({
               </Button>
               <Button
                 variant="primary"
-                disabled={!text.trim() || submitting}
-                onClick={() => run(onSend)}
-                title={`Send the comment to the --send command (${SUBMIT_KEYS})`}
+                disabled={!text.trim() || submitting || !sendAction}
+                onClick={() => run(sendAction)}
+                title={
+                  onOrcaSend
+                    ? `Send to the selected Orca agents (${SUBMIT_KEYS})`
+                    : `Send the comment to the --send command (${SUBMIT_KEYS})`
+                }
               >
-                Send
+                {onOrcaSend
+                  ? picks.length > 1
+                    ? `Send to ${picks.length} Agents`
+                    : 'Send to Orca'
+                  : 'Send'}
               </Button>
             </>
           ) : (
@@ -1894,6 +2020,60 @@ function DiffView() {
     },
   })
 
+  const sendToOrca = useCallback(
+    ({ quote, ...body }: SendRequest & { quote: string | null }, choices: OrcaChoice[]) => {
+      if (!body.file || !body.side || !body.lines) return
+      const { file, side, lines, text } = body
+      const jobs = choices.map(({ label, id, kind }) => ({
+        comment: {
+          id: ++sentId.current,
+          file,
+          side,
+          lines,
+          text,
+          quote,
+          delivery: { label, status: 'Sending to Orca…', pending: true },
+        },
+        target: { kind, id },
+      }))
+      setSent((prev) => [...prev, ...jobs.map(({ comment }) => comment)])
+      setComposing(null)
+      // Each receipt settles independently. Opening another composer never waits
+      // on Orca or changes the destination of a pending delivery.
+      for (const { comment, target } of jobs) {
+        const settle = (status: string, deliveryError?: string) =>
+          setSent((prev) =>
+            prev.map((row) =>
+              row.id === comment.id
+                ? {
+                    ...row,
+                    delivery: {
+                      label: comment.delivery.label,
+                      status,
+                      error: deliveryError,
+                    },
+                  }
+                : row,
+            ),
+          )
+        void apiFetch<{ status: string }>('api/orca/send', {
+          method: 'POST',
+          body: { ...body, target },
+        }).then(
+          ({ status }) => settle(status),
+          (failure: unknown) =>
+            settle(
+              'Delivery not confirmed',
+              failure instanceof Error
+                ? failure.message
+                : 'Check Orca before sending again.',
+            ),
+        )
+      }
+    },
+    [],
+  )
+
   const resolveMutation = useMutation({
     mutationFn: ({ file, line }: { file: string; line: number }) =>
       apiFetch('api/comment', {
@@ -2286,7 +2466,7 @@ function DiffView() {
           lineNumber: line,
           metadata: { type: 'sent', sent: s },
         })
-        sentHere.push(`${s.id}@${line}`)
+        sentHere.push(`${s.id}@${line}:${s.delivery?.pending ? 1 : 0}`)
       }
       // A box on part of a line goes inside the line instead (see inlineBox)
       const composingHere = composing?.file === name && !composing.text?.columns
@@ -2493,6 +2673,16 @@ function DiffView() {
       if (!composing) return null
       const { file, side, first, line, text: selected } = composing
       const columns = selected?.columns ?? null
+      const sendBody = (text: string) => ({
+        file,
+        side,
+        lines: [first, line] as [number, number],
+        columns,
+        quote: columns && selected ? selected.quote : null,
+        code: fileDiff && lineContext(fileDiff, side, first, line),
+        blob: fileDiff && sideBlob(fileDiff, side),
+        text,
+      })
       return (
         <CommentForm
           key={composing.opened}
@@ -2515,19 +2705,12 @@ function DiffView() {
             })
           }}
           onSend={
-            data?.send
-              ? (text) =>
-                  sendMutation.mutate({
-                    file,
-                    side,
-                    lines: [first, line],
-                    columns,
-                    quote: columns && selected ? selected.quote : null,
-                    code: fileDiff && lineContext(fileDiff, side, first, line),
-                    blob: fileDiff && sideBlob(fileDiff, side),
-                    text,
-                  })
+            data?.send && !data.orca
+              ? (text) => sendMutation.mutate(sendBody(text))
               : undefined
+          }
+          onOrcaSend={
+            data?.orca ? (text, choices) => sendToOrca(sendBody(text), choices) : undefined
           }
           inlineUnavailable={
             !commentsEnabled
@@ -2550,7 +2733,7 @@ function DiffView() {
         />
       )
     },
-    [commentMutation, sendMutation, data, composing, commentsEnabled],
+    [commentMutation, sendMutation, sendToOrca, data, composing, commentsEnabled],
   )
 
   const renderAnnotation = useCallback(
@@ -2580,23 +2763,31 @@ function DiffView() {
         )
       }
       if (meta.type === 'sent') {
-        const { id, quote, text } = meta.sent
+        const { id, quote, text, delivery } = meta.sent
         return (
           <div className="sent-comment">
             <div className="sent-comment-head">
-              <span className="sent-comment-label">Sent</span>
+              <span className="sent-comment-label" role={delivery ? 'status' : undefined}>
+                {delivery ? `${delivery.status} · ${delivery.label}` : 'Sent'}
+              </span>
               {quote && <span className="comment-quote">{shortQuote(quote, 120)}</span>}
               <button
                 type="button"
                 className="sent-comment-dismiss"
                 aria-label="Dismiss"
                 title="Dismiss"
+                disabled={delivery?.pending}
                 onClick={() => setSent((prev) => prev.filter((s) => s.id !== id))}
               >
                 ×
               </button>
             </div>
             <div className="sent-comment-text">{text}</div>
+            {delivery?.error && (
+              <div role="alert" className="comment-form-error">
+                {delivery.error}
+              </div>
+            )}
           </div>
         )
       }

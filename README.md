@@ -288,6 +288,43 @@ isn't the page's own.
 
 </details>
 
+## Send review comments to Orca
+
+Open your checkout as a workspace in the local Orca desktop app and install its
+`orca` CLI. Use Orca v1.4.277 or later for the CLI commands used here. From this
+fork's checkout, build once:
+
+```sh
+npm ci
+npm run build
+```
+
+Then, from the **checkout you want to review**, run:
+
+```sh
+node /path/to/skepsis/dist/cli.js --orca
+```
+
+Click a diff line (or select a range) to write a comment. In **Existing agents**,
+select a specific Orca session to keep its context. In **Start a new agent**,
+select an enabled provider to launch in the same workspace with the comment as
+its first prompt. You can select several targets, then click **Send to Orca** or
+press Cmd/Ctrl+Enter. The comment card shows a separate delivery status for each
+agent. Keep reviewing without waiting for replies; read the replies in Orca.
+The **Comment** action still writes a local review marker instead.
+
+Only the exact local Orca worktree is offered. Sleeping terminal agents must
+be reopened in Orca before they can receive a comment. Orca may queue terminal
+mail until the agent checks its messages; a receipt is not an answer. For the
+first send to an existing agent, Skepsis creates a background **Skepsis review
+sender** shell tab to supply its own Orca sender identity. Leave this tab idle
+while reviewing; you can close it from Orca when done. If a delivery status is
+unclear, check Orca before manually resending to avoid duplicates.
+
+This mode is opt-in, uses the existing loopback and per-run token protections,
+and cannot be combined with `--send`. It does not publish review comments,
+create new worktrees, or use npm's upstream `@oxide/skepsis` binary.
+
 ## Embedding
 
 A Node server can mount the review page under any URL prefix, serving any
