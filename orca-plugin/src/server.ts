@@ -17,8 +17,20 @@ import {
 } from 'node:http'
 import { Readable } from 'node:stream'
 import type { ReadableStream as NodeReadableStream } from 'node:stream/web'
-import { createApp, type App, type AppOptions } from '../dist/lib.js'
+import {
+  createApp,
+  createRemoteProxyApp,
+  type App,
+  type AppOptions,
+  type RemoteProxyOptions,
+} from '../dist/lib.js'
 import type { MountedSummary } from './protocol.ts'
+import {
+  RemoteSessionPool,
+  type RemoteHostSession,
+  type RemoteTransportFactory,
+} from './remoteBridge.ts'
+import { isWslUncPath } from './remoteHost.ts'
 
 const LOOPBACK_HOST = '127.0.0.1'
 const MAX_REQUEST_BODY_BYTES = 2 * 1024 * 1024
@@ -28,6 +40,7 @@ export type ServerConfig = {
   tabSize: number
   diffBase: string
   orcaBinary: string
+  remoteNode: string
 }
 
 export type MountTarget = {
@@ -35,14 +48,27 @@ export type MountTarget = {
   name: string
   branch: string | null
   path: string
+  hostId: string | null
+  hostLabel: string
+  remote?: {
+    sshHost: string
+    environmentName: string | null
+    expectedOrcaHostId: string
+  }
 }
 
 type MountedEntry = {
+  cacheKey: string
   slug: string
   workspaceId: string | null
   name: string
   branch: string | null
   path: string
+  hostId: string | null
+  hostLabel: string
+  isRemote: boolean
+  remoteSshHost: string | null
+  remoteSession: RemoteHostSession | null
   app: App
   diffBase: string
   configKey: string
@@ -50,10 +76,11 @@ type MountedEntry = {
 }
 
 export type CreateAppFn = (opts: AppOptions) => Promise<App>
+export type CreateRemoteProxyFn = (opts: RemoteProxyOptions) => App
 
 /**
  * Checks whether a workspace lives on this local machine (not SSH, paired
- * runtime, or WSL UNC share) so the local loopback Skepsis server can read it.
+ * runtime, or WSL UNC share). Kept exported for compatibility & unit tests.
  */
 export function isLocalWorkspace(
   hostId: string | null | undefined,
@@ -62,18 +89,13 @@ export function isLocalWorkspace(
   if (hostId != null && hostId !== 'local') {
     return {
       ok: false,
-      reason: `Workspace is on ${hostId}. Skepsis only supports local workspaces.`,
+      reason: `Workspace is on ${hostId}.`,
     }
   }
   if (!path) {
     return { ok: false, reason: 'Workspace has no local directory path.' }
   }
-  const lower = path.toLowerCase()
-  if (
-    lower.startsWith('\\\\wsl.localhost\\') ||
-    lower.startsWith('\\\\wsl$\\') ||
-    lower.startsWith('//wsl.localhost/')
-  ) {
+  if (isWslUncPath(path)) {
     return {
       ok: false,
       reason: 'WSL workspaces cannot be served from the desktop worker.',
@@ -82,8 +104,17 @@ export function isLocalWorkspace(
   return { ok: true }
 }
 
-export function worktreeSlug(realPath: string): string {
-  return createHash('sha256').update(realPath).digest('hex').slice(0, 12)
+export function worktreeSlug(key: string): string {
+  return createHash('sha256').update(key).digest('hex').slice(0, 12)
+}
+
+function normalizeRemotePath(path: string): string {
+  return path.length > 1 ? path.replace(/\/+$/, '') : path
+}
+
+function cacheKeyFor(hostId: string | null | undefined, canonicalPath: string): string {
+  const host = hostId ?? 'local'
+  return host === 'local' ? canonicalPath : `${host}::${canonicalPath}`
 }
 
 export function buildBrowserOpenCommand(
@@ -190,13 +221,24 @@ export class SkepsisServerManager {
   #server: Server | null = null
   #starting: Promise<number> | null = null
   #port: number | null = null
-  #byPath = new Map<string, MountedEntry>()
+  #byKey = new Map<string, MountedEntry>()
   #bySlug = new Map<string, MountedEntry>()
   #mounting = new Map<string, Promise<MountedSummary>>()
   #createApp: CreateAppFn
+  #createRemoteProxyApp: CreateRemoteProxyFn
+  #remotePool: RemoteSessionPool
+  #onRemoteDisconnect: () => void
 
-  constructor(createAppFn: CreateAppFn = createApp) {
-    this.#createApp = createAppFn
+  constructor(opts?: {
+    createApp?: CreateAppFn
+    createRemoteProxyApp?: CreateRemoteProxyFn
+    remoteTransportFactory?: RemoteTransportFactory
+    onRemoteDisconnect?: () => void
+  }) {
+    this.#createApp = opts?.createApp ?? createApp
+    this.#createRemoteProxyApp = opts?.createRemoteProxyApp ?? createRemoteProxyApp
+    this.#remotePool = new RemoteSessionPool(opts?.remoteTransportFactory)
+    this.#onRemoteDisconnect = opts?.onRemoteDisconnect ?? (() => {})
   }
 
   get running(): boolean {
@@ -222,6 +264,9 @@ export class SkepsisServerManager {
       name: entry.name,
       branch: entry.branch,
       path: entry.path,
+      hostId: entry.hostId,
+      hostLabel: entry.hostLabel,
+      isRemote: entry.isRemote,
       url: this.#urlFor(entry),
       diffBase: entry.diffBase,
       startedAt: entry.startedAt,
@@ -230,20 +275,28 @@ export class SkepsisServerManager {
 
   listMounted(): MountedSummary[] {
     if (!this.running) return []
-    return [...this.#byPath.values()]
+    return [...this.#byKey.values()]
       .toSorted((a, b) => b.startedAt - a.startedAt)
       .map((entry) => this.#summarize(entry))
   }
 
-  findByPath(path: string | null | undefined): MountedSummary | null {
+  findMounted(
+    path: string | null | undefined,
+    hostId?: string | null,
+  ): MountedSummary | null {
     if (!path || !this.running) return null
-    let canonical = path
-    try {
-      canonical = realpathSync(path)
-    } catch {
-      // Fall back to the raw path if the directory was removed.
+    const isLocal = hostId == null || hostId === 'local'
+    let canonical = isLocal ? path : normalizeRemotePath(path)
+    if (isLocal) {
+      try {
+        canonical = realpathSync(path)
+      } catch {
+        // Fall back to raw path if the directory was removed.
+      }
     }
-    const entry = this.#byPath.get(canonical) ?? this.#byPath.get(path)
+    const entry =
+      this.#byKey.get(cacheKeyFor(hostId, canonical)) ??
+      this.#byKey.get(cacheKeyFor(hostId, path))
     return entry ? this.#summarize(entry) : null
   }
 
@@ -331,7 +384,7 @@ export class SkepsisServerManager {
     }
   }
 
-  async #buildWorktreeApp(
+  async #buildLocalWorktreeApp(
     realPath: string,
     config: ServerConfig,
   ): Promise<{ app: App; diffBase: string }> {
@@ -360,49 +413,116 @@ export class SkepsisServerManager {
     }
   }
 
+  #evictRemoteHost(sshHost: string): void {
+    let removed = false
+    for (const entry of this.#byKey.values()) {
+      if (entry.remoteSshHost === sshHost) {
+        this.#byKey.delete(entry.cacheKey)
+        this.#bySlug.delete(entry.slug)
+        removed = true
+      }
+    }
+    if (removed) {
+      this.#onRemoteDisconnect()
+    }
+  }
+
   async ensureMounted(target: MountTarget, config: ServerConfig): Promise<MountedSummary> {
-    let realPath: string
-    try {
-      realPath = realpathSync(target.path)
-    } catch (error) {
-      throw new Error(`Workspace directory does not exist: ${target.path}`, {
-        cause: error,
-      })
+    const isRemote = !!target.remote
+    let canonicalPath: string
+    if (isRemote) {
+      canonicalPath = normalizeRemotePath(target.path)
+    } else {
+      try {
+        canonicalPath = realpathSync(target.path)
+      } catch (error) {
+        throw new Error(`Workspace directory does not exist: ${target.path}`, {
+          cause: error,
+        })
+      }
     }
 
+    const cacheKey = cacheKeyFor(target.hostId, canonicalPath)
     const configKey = JSON.stringify([
       config.tabSize,
       config.diffBase.trim(),
       config.orcaBinary.trim(),
+      config.remoteNode.trim(),
+      target.remote?.sshHost ?? '',
+      target.remote?.environmentName ?? '',
     ])
-    const existing = this.#byPath.get(realPath)
-    if (existing && existing.configKey === configKey && this.running) {
+    const existing = this.#byKey.get(cacheKey)
+    if (
+      existing &&
+      existing.configKey === configKey &&
+      this.running &&
+      (!existing.remoteSession || !existing.remoteSession.closed)
+    ) {
       existing.workspaceId = target.workspaceId
       existing.name = target.name
       existing.branch = target.branch
+      existing.hostLabel = target.hostLabel
       return this.#summarize(existing)
     }
 
-    const dedupeKey = `${realPath}::${configKey}`
+    const dedupeKey = `${cacheKey}::${configKey}`
     const pending = this.#mounting.get(dedupeKey)
     if (pending) return pending
 
     const work = (async () => {
       await this.#ensureServer()
-      const { app, diffBase } = await this.#buildWorktreeApp(realPath, config)
-      const slug = worktreeSlug(realPath)
+      const slug = worktreeSlug(cacheKey)
+
+      let app: App
+      let diffBase: string
+      let remoteSession: RemoteHostSession | null = null
+
+      if (target.remote) {
+        const { sshHost, environmentName, expectedOrcaHostId } = target.remote
+        remoteSession = await this.#remotePool.getSession(sshHost, config.remoteNode, () =>
+          this.#evictRemoteHost(sshHost),
+        )
+        const mountedRemote = await remoteSession.mountWorktree({
+          key: slug,
+          cwd: canonicalPath,
+          tabSize: config.tabSize,
+          diffBase: config.diffBase.trim(),
+        })
+        diffBase = mountedRemote.diffBase
+        const activeSession = remoteSession
+        app = this.#createRemoteProxyApp({
+          remoteRoot: canonicalPath,
+          remoteFetch: (req) => activeSession.fetchWorktree(slug, req),
+          orca: {
+            environment: environmentName ?? undefined,
+            expectedHostId: expectedOrcaHostId,
+            binary: config.orcaBinary || undefined,
+          },
+        })
+      } else {
+        const built = await this.#buildLocalWorktreeApp(canonicalPath, config)
+        app = built.app
+        diffBase = built.diffBase
+      }
+
       const entry: MountedEntry = {
+        cacheKey,
         slug,
         workspaceId: target.workspaceId,
         name: target.name,
         branch: target.branch,
-        path: realPath,
+        path: canonicalPath,
+        hostId: target.hostId,
+        hostLabel: target.hostLabel,
+        isRemote,
+        remoteSshHost: target.remote?.sshHost ?? null,
+        remoteSession,
         app,
         diffBase,
         configKey,
         startedAt: Date.now(),
       }
-      this.#byPath.set(realPath, entry)
+      this.#byKey.set(cacheKey, entry)
       this.#bySlug.set(slug, entry)
       return this.#summarize(entry)
     })()
@@ -417,18 +537,37 @@ export class SkepsisServerManager {
     }
   }
 
-  unmountPath(path: string): boolean {
+  unmountPath(path: string, hostId?: string | null): boolean {
+    let removed = false
     let canonical = path
-    try {
-      canonical = realpathSync(path)
-    } catch {
-      // Directory may already be deleted when workspace.removed arrives.
+    if (hostId == null || hostId === 'local') {
+      try {
+        canonical = realpathSync(path)
+      } catch {
+        // Directory may already be deleted when workspace.removed arrives.
+      }
+    } else {
+      canonical = normalizeRemotePath(path)
     }
-    const entry = this.#byPath.get(canonical) ?? this.#byPath.get(path)
-    if (!entry) return false
-    this.#byPath.delete(entry.path)
-    this.#bySlug.delete(entry.slug)
-    return true
+
+    for (const entry of this.#byKey.values()) {
+      const hostMatches =
+        hostId === undefined || (entry.hostId ?? 'local') === (hostId ?? 'local')
+      if (!hostMatches) continue
+      if (
+        entry.path === canonical ||
+        entry.path === path ||
+        entry.path === normalizeRemotePath(path)
+      ) {
+        this.#byKey.delete(entry.cacheKey)
+        this.#bySlug.delete(entry.slug)
+        if (entry.remoteSession) {
+          void entry.remoteSession.unmountWorktree(entry.slug)
+        }
+        removed = true
+      }
+    }
+    return removed
   }
 
   async stop(): Promise<void> {
@@ -436,8 +575,9 @@ export class SkepsisServerManager {
     this.#server = null
     this.#port = null
     this.#starting = null
-    this.#byPath.clear()
+    this.#byKey.clear()
     this.#bySlug.clear()
+    this.#remotePool.closeAll()
     if (!server) return
     await new Promise<void>((resolve) => {
       server.close(() => resolve())

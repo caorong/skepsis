@@ -90,6 +90,23 @@
         "type": "string",
         "default": "",
         "placeholder": "/Applications/Orca.app/Contents/Resources/bin/orca"
+      },
+      {
+        "key": "sshHostMap",
+        "title": "Remote SSH Host Overrides",
+        "description": "Optional mapping from Orca remote environment/host names to ~/.ssh/config aliases (one per line: name=ssh-alias). Leave empty to use the Orca host name directly.",
+        "type": "string",
+        "default": "",
+        "multiline": true,
+        "placeholder": "orderlyClaw2=orderlyClaw2"
+      },
+      {
+        "key": "remoteNode",
+        "title": "Remote Node.js Path",
+        "description": "Optional path to Node.js 22+ on remote SSH hosts (e.g. /usr/local/bin/node). Leave empty to auto-detect on the remote host.",
+        "type": "string",
+        "default": "",
+        "placeholder": "Auto-detect (Node.js 22+ required)"
       }
     ]
   }

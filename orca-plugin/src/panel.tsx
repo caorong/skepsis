@@ -105,11 +105,11 @@ export function setup(ctx: PanelContext): void {
 
 function ActiveSessionList({
   items,
-  currentPath,
+  currentSlug,
   busy,
 }: {
   items: MountedSummary[]
-  currentPath: string | null
+  currentSlug: string | null
   busy: boolean
 }) {
   if (items.length === 0) return null
@@ -117,21 +117,24 @@ function ActiveSessionList({
     <Stack gap="xs">
       <Heading level={2}>Active reviews ({items.length})</Heading>
       <List label="Active review sessions">
-        {items.map((item) => (
-          <ListItem
-            key={item.path}
-            title={item.name}
-            description={item.branch ? `${item.branch} · ${item.diffBase}` : item.diffBase}
-            icon="branch"
-            current={item.path === currentPath}
-            disabled={busy}
-            onPress={() => {
-              if (item.workspaceId) {
-                void openWorkspace(item.workspaceId)
-              }
-            }}
-          />
-        ))}
+        {items.map((item) => {
+          const parts = [item.hostLabel, item.branch, item.diffBase].filter(Boolean)
+          return (
+            <ListItem
+              key={item.slug}
+              title={item.name}
+              description={parts.join(' · ')}
+              icon={item.isRemote ? 'cloud' : 'branch'}
+              current={item.slug === currentSlug}
+              disabled={busy}
+              onPress={() => {
+                if (item.workspaceId) {
+                  void openWorkspace(item.workspaceId)
+                }
+              }}
+            />
+          )
+        })}
       </List>
     </Stack>
   )
@@ -147,6 +150,9 @@ export default function SkepsisPanel() {
   const focused = state?.focused ?? null
   const currentReview = state?.currentReview ?? null
   const running = state?.running ?? false
+  const isRemoteFocused =
+    focused !== null &&
+    (focused.transport === 'remote-orca' || focused.transport === 'remote-ssh')
 
   return (
     <Stack gap="md">
@@ -181,18 +187,27 @@ export default function SkepsisPanel() {
         <EmptyState
           icon="folder"
           title="No active workspace"
-          description="Focus a local Git or jj workspace in Orca to open Skepsis code review."
+          description="Focus a local or remote Git/jj workspace in Orca to open Skepsis code review."
         />
       ) : (
         <Card
           title={focused.name}
-          description={focused.branch ? `Branch: ${focused.branch}` : 'Local workspace'}
+          description={
+            focused.branch ? `${focused.hostLabel} · ${focused.branch}` : focused.hostLabel
+          }
         >
           <Stack gap="sm">
-            {!focused.isLocal ? (
-              <Callout tone="warning" title="Local workspaces only" icon="warning">
+            {!focused.supported ? (
+              <Callout tone="warning" title="Workspace unavailable" icon="warning">
                 <Text size="sm">
-                  {focused.reason ?? 'Skepsis only supports local workspaces.'}
+                  {focused.reason ?? 'This workspace cannot be opened in Skepsis.'}
+                </Text>
+              </Callout>
+            ) : isRemoteFocused && !currentReview ? (
+              <Callout tone="accent" title="Remote workspace via SSH" icon="cloud">
+                <Text size="sm">
+                  Connects to {focused.sshHost} over SSH (requires Node.js 22+ on the remote
+                  host) and serves the UI locally in your browser.
                 </Text>
               </Callout>
             ) : null}
@@ -202,7 +217,7 @@ export default function SkepsisPanel() {
                 variant="solid"
                 tone="accent"
                 icon="open-external"
-                disabled={!focused.isLocal || busy}
+                disabled={!focused.supported || busy}
                 onPress={() => void openWorkspace(focused.id)}
               >
                 {busy
@@ -231,6 +246,7 @@ export default function SkepsisPanel() {
                   label="Current review session"
                   items={[
                     { label: 'Status', value: 'Serving', tone: 'success' },
+                    { label: 'Host', value: currentReview.hostLabel },
                     { label: 'Diff base', value: currentReview.diffBase },
                     {
                       label: 'Opener',
@@ -254,15 +270,15 @@ export default function SkepsisPanel() {
       {state && state.mounted.length > 0 ? (
         <ActiveSessionList
           items={state.mounted}
-          currentPath={focused?.path ?? null}
+          currentSlug={currentReview?.slug ?? null}
           busy={busy}
         />
       ) : null}
 
       <Text size="xs" muted>
-        Tip: Click Skepsis in the bottom status bar or press Mod+Alt+R to open this
-        workspace in Chrome. Configure a custom browser command in Settings → Plugins →
-        Skepsis Review.
+        Tip: Click Skepsis in the bottom status bar or press Mod+Alt+R to open local or
+        remote workspaces in Chrome. Configure browser command, SSH host overrides, or
+        remote Node.js path in Settings → Plugins → Skepsis Review.
       </Text>
     </Stack>
   )

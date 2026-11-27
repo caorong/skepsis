@@ -8,11 +8,18 @@
 
 import type { Disposable, OrcaWorkerApi } from 'orca/worker'
 import type { FocusedWorkspace, OpenReviewInput, PluginState } from './protocol.ts'
+import type { RemoteTransportFactory } from './remoteBridge.ts'
 import {
-  isLocalWorkspace,
+  createRemoteRegistryReader,
+  parseSshHostMap,
+  resolveWorkspaceHost,
+  type OrcaRemoteRegistry,
+} from './remoteHost.ts'
+import {
   launchBrowser,
   SkepsisServerManager,
   type CreateAppFn,
+  type CreateRemoteProxyFn,
   type ServerConfig,
 } from './server.ts'
 
@@ -29,6 +36,9 @@ type WorkspaceRow = {
 
 export type WorkerDeps = {
   createApp?: CreateAppFn
+  createRemoteProxyApp?: CreateRemoteProxyFn
+  remoteTransportFactory?: RemoteTransportFactory
+  loadRemoteRegistry?: (orcaBinary?: string) => Promise<OrcaRemoteRegistry>
   openBrowser?: (url: string, openCommand?: string) => Promise<void>
 }
 
@@ -57,12 +67,23 @@ export async function activateWithDeps(
     await activeTeardown()
   }
 
-  const manager = new SkepsisServerManager(deps.createApp)
+  let broadcastStateRef: (() => Promise<PluginState>) | null = null
+  const manager = new SkepsisServerManager({
+    createApp: deps.createApp,
+    createRemoteProxyApp: deps.createRemoteProxyApp,
+    remoteTransportFactory: deps.remoteTransportFactory,
+    onRemoteDisconnect: () => {
+      void broadcastStateRef?.()
+    },
+  })
+  const readRegistry = createRemoteRegistryReader(deps.loadRemoteRegistry)
   const openBrowser = deps.openBrowser ?? launchBrowser
   const disposables: Disposable[] = []
   let lastError: string | null = null
 
-  async function readConfig(): Promise<ServerConfig & { openCommand: string }> {
+  async function readConfig(): Promise<
+    ServerConfig & { openCommand: string; sshHostMap: Map<string, string> }
+  > {
     try {
       const raw = await orca.settings.get()
       return {
@@ -70,9 +91,18 @@ export async function activateWithDeps(
         tabSize: parseTabSize(raw.tabSize),
         diffBase: asString(raw.diffBase),
         orcaBinary: asString(raw.orcaBinary),
+        remoteNode: asString(raw.remoteNode),
+        sshHostMap: parseSshHostMap(asString(raw.sshHostMap)),
       }
     } catch {
-      return { openCommand: '', tabSize: 2, diffBase: '', orcaBinary: '' }
+      return {
+        openCommand: '',
+        tabSize: 2,
+        diffBase: '',
+        orcaBinary: '',
+        remoteNode: '',
+        sshHostMap: new Map(),
+      }
     }
   }
 
@@ -81,7 +111,11 @@ export async function activateWithDeps(
     return res.workspaces
   }
 
-  async function resolveWorkspace(workspaceId?: string): Promise<FocusedWorkspace | null> {
+  async function resolveWorkspace(
+    workspaceId: string | undefined,
+    config: { orcaBinary: string; sshHostMap: Map<string, string> },
+    forceRegistryRefresh = false,
+  ): Promise<{ focused: FocusedWorkspace | null; expectedOrcaHostId: string }> {
     const context = workspaceId ? null : await orca.host.call('workspace.readContext')
     const targetId = workspaceId ?? context?.workspaceId
     const rows = await listWorkspaces()
@@ -96,37 +130,70 @@ export async function activateWithDeps(
     }
 
     if (!match) {
-      if (!context) return null
+      if (!context) return { focused: null, expectedOrcaHostId: 'local' }
       return {
-        id: context.workspaceId ?? context.displayName,
-        name: context.displayName,
-        branch: context.branch || null,
-        path: null,
-        kind: null,
-        isLocal: false,
-        reason: 'Could not locate this workspace path in Orca.',
+        focused: {
+          id: context.workspaceId ?? context.displayName,
+          name: context.displayName,
+          branch: context.branch || null,
+          path: null,
+          kind: null,
+          hostId: null,
+          transport: 'unsupported',
+          hostLabel: 'Unknown',
+          sshHost: null,
+          environmentName: null,
+          supported: false,
+          reason: 'Could not locate this workspace path in Orca.',
+        },
+        expectedOrcaHostId: 'local',
       }
     }
 
-    const localCheck = isLocalWorkspace(match.hostId, match.path)
+    const needsRegistry =
+      match.hostId != null &&
+      match.hostId !== 'local' &&
+      (match.hostId.startsWith('runtime:') || match.hostId.startsWith('ssh:'))
+    const registry: OrcaRemoteRegistry = needsRegistry
+      ? await readRegistry(config.orcaBinary, forceRegistryRefresh).catch(() => ({
+          environments: [],
+          sshHosts: [],
+        }))
+      : { environments: [], sshHosts: [] }
+
+    const resolved = resolveWorkspaceHost(
+      match.hostId,
+      match.path,
+      registry,
+      config.sshHostMap,
+    )
     return {
-      id: match.id,
-      name: match.name,
-      branch: match.branch,
-      path: match.path,
-      kind: match.kind,
-      isLocal: localCheck.ok,
-      reason: localCheck.ok ? null : localCheck.reason,
+      focused: {
+        id: match.id,
+        name: match.name,
+        branch: match.branch,
+        path: match.path,
+        kind: match.kind,
+        hostId: match.hostId,
+        transport: resolved.transport,
+        hostLabel: resolved.hostLabel,
+        sshHost: resolved.sshHost,
+        environmentName: resolved.environmentName,
+        supported: resolved.supported,
+        reason: resolved.reason,
+      },
+      expectedOrcaHostId: resolved.expectedOrcaHostId,
     }
   }
 
   async function buildState(workspaceId?: string): Promise<PluginState> {
-    const [focused, config] = await Promise.all([
-      resolveWorkspace(workspaceId).catch(() => null),
-      readConfig(),
-    ])
+    const config = await readConfig()
+    const { focused } = await resolveWorkspace(workspaceId, config).catch(() => ({
+      focused: null,
+      expectedOrcaHostId: 'local',
+    }))
     const mounted = manager.listMounted()
-    const currentReview = manager.findByPath(focused?.path)
+    const currentReview = manager.findMounted(focused?.path, focused?.hostId)
     return {
       running: manager.running,
       port: manager.port,
@@ -147,16 +214,18 @@ export async function activateWithDeps(
     if (state.currentReview && state.port !== null) {
       text = `Skepsis · :${state.port}`
       tone = 'success'
-      tooltip = `Open Skepsis review for ${state.currentReview.name} (${state.currentReview.url})`
+      tooltip = `Open Skepsis review for ${state.currentReview.name} (${state.currentReview.hostLabel})`
     } else if (state.running && state.mounted.length > 0) {
       text = `Skepsis · ${state.mounted.length}`
       tone = 'accent'
       tooltip = state.focused
-        ? `Open Skepsis review for ${state.focused.name}`
+        ? `Open Skepsis review for ${state.focused.name} (${state.focused.hostLabel})`
         : `Skepsis server running (${state.mounted.length} active)`
-    } else if (state.focused && !state.focused.isLocal) {
+    } else if (state.focused && !state.focused.supported) {
       tone = 'warning'
-      tooltip = state.focused.reason ?? 'Skepsis only supports local workspaces'
+      tooltip = state.focused.reason ?? 'Workspace is not supported by Skepsis'
+    } else if (state.focused && state.focused.transport !== 'local') {
+      tooltip = `Open remote Skepsis review for ${state.focused.name} (${state.focused.hostLabel})`
     }
 
     try {
@@ -178,29 +247,51 @@ export async function activateWithDeps(
     orca.panels.post('skepsis.state', state)
     return state
   }
+  broadcastStateRef = () => broadcastState()
 
   async function openReview(
     input: OpenReviewInput = {},
     notifyOnError = false,
   ): Promise<{ state: PluginState; url: string; opened: boolean }> {
     try {
-      const [focused, config] = await Promise.all([
-        resolveWorkspace(input.workspaceId),
-        readConfig(),
-      ])
-      if (!focused) {
-        throw new Error('No active workspace. Focus a local workspace in Orca first.')
+      const config = await readConfig()
+      let { focused, expectedOrcaHostId } = await resolveWorkspace(
+        input.workspaceId,
+        config,
+      )
+      if (focused && !focused.supported && focused.hostId?.startsWith('runtime:')) {
+        // Refresh remote environment list once in case the user just paired a server.
+        ;({ focused, expectedOrcaHostId } = await resolveWorkspace(
+          input.workspaceId,
+          config,
+          true,
+        ))
       }
-      if (!focused.isLocal || !focused.path) {
-        throw new Error(focused.reason ?? 'Skepsis only supports local workspaces.')
+      if (!focused) {
+        throw new Error('No active workspace. Focus a workspace in Orca first.')
+      }
+      if (!focused.supported || !focused.path) {
+        throw new Error(focused.reason ?? 'This workspace cannot be opened in Skepsis.')
       }
 
+      const isRemote =
+        focused.transport === 'remote-orca' || focused.transport === 'remote-ssh'
       const mounted = await manager.ensureMounted(
         {
           workspaceId: focused.id,
           name: focused.name,
           branch: focused.branch,
           path: focused.path,
+          hostId: focused.hostId,
+          hostLabel: focused.hostLabel,
+          remote:
+            isRemote && focused.sshHost
+              ? {
+                  sshHost: focused.sshHost,
+                  environmentName: focused.environmentName,
+                  expectedOrcaHostId,
+                }
+              : undefined,
         },
         config,
       )
@@ -212,7 +303,9 @@ export async function activateWithDeps(
       }
 
       lastError = null
-      orca.log(`Serving ${mounted.name} (${mounted.diffBase}) at ${mounted.url}`)
+      orca.log(
+        `Serving ${mounted.name} [${mounted.hostLabel}] (${mounted.diffBase}) at ${mounted.url}`,
+      )
       const state = await broadcastState()
       return { state, url: mounted.url, opened }
     } catch (error) {
@@ -256,8 +349,8 @@ export async function activateWithDeps(
       orca.log('Stopped Skepsis review server')
       return broadcastState()
     }),
-    orca.panels.handle('skepsis.unmount', async ({ path }) => {
-      manager.unmountPath(path)
+    orca.panels.handle('skepsis.unmount', async ({ path, hostId }) => {
+      manager.unmountPath(path, hostId)
       return broadcastState()
     }),
     orca.events.on('workspace.changed', async () => {
@@ -276,6 +369,7 @@ export async function activateWithDeps(
 
   activeTeardown = async () => {
     activeTeardown = null
+    broadcastStateRef = null
     for (const item of disposables.splice(0)) {
       item.dispose()
     }

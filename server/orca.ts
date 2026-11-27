@@ -86,18 +86,38 @@ function macosBundledOrca(): string | null {
   return null
 }
 
-export function orcaRunner(cwd: string, binary?: string): Run {
-  // This bridge is deliberately local. Do not inherit a paired target from a shell.
+export interface OrcaRunnerOptions {
+  binary?: string
+  /** Target a saved paired remote Orca server (`--environment <name|id>`). */
+  environment?: string
+}
+
+export interface RemoteOrcaScope {
+  /** Expected `hostId` on the targeted Orca runtime (`'local'` on a paired
+   *  remote server, or `'ssh:...'` on the desktop host). */
+  expectedHostId?: string
+}
+
+function normalizeRemotePath(value: string): string {
+  return value.length > 1 ? value.replace(/\/+$/, '') : value
+}
+
+export function orcaRunner(cwd: string, binaryOrOpts?: string | OrcaRunnerOptions): Run {
+  const opts: OrcaRunnerOptions =
+    typeof binaryOrOpts === 'string' ? { binary: binaryOrOpts } : (binaryOrOpts ?? {})
+  const environment = opts.environment?.trim() || null
+  // Local mode stays deliberately local; remote mode explicitly selects `--environment`.
   const env = { ...process.env }
   delete env.ORCA_ENVIRONMENT
-  const explicit = binary?.trim() || null
+  const explicit = opts.binary?.trim() || null
   let resolvedBinary = explicit ?? 'orca'
+  const execCwd = existsSync(cwd) ? cwd : homedir()
 
   const execOrca = (bin: string, args: string[], mutating: boolean) =>
-    exec(bin, [...args, '--json'], {
-      cwd,
+    exec(bin, [...(environment ? ['--environment', environment] : []), ...args, '--json'], {
+      cwd: execCwd,
       env,
-      timeout: mutating ? 35_000 : 8_000,
+      timeout: mutating ? 35_000 : 12_000,
       maxBuffer: 8 * 1024 * 1024,
       encoding: 'utf8',
       windowsHide: true,
@@ -190,8 +210,29 @@ function inScope(
   )
 }
 
-export function createOrcaBridge(root: string, run: Run = orcaRunner(root)) {
+export function createOrcaBridge(
+  root: string,
+  run: Run = orcaRunner(root),
+  remote?: RemoteOrcaScope,
+) {
   async function scope() {
+    if (remote) {
+      const normalizedRoot = normalizeRemotePath(root)
+      const { worktree } = read(
+        workspace,
+        await run(['worktree', 'show', '--worktree', `path:${normalizedRoot}`], false),
+      )
+      const expectedHost = remote.expectedHostId ?? 'local'
+      if (
+        (worktree.hostId ?? 'local') !== expectedHost ||
+        normalizeRemotePath(worktree.path) !== normalizedRoot
+      ) {
+        throw new Error(
+          'Open this exact remote checkout as an Orca workspace before sending review comments.',
+        )
+      }
+      return { ...worktree, selector: `id:${worktree.id}` }
+    }
     const { worktree } = read(workspace, await run(['worktree', 'current'], false))
     const path = await realpath(worktree.path).catch(() => null)
     if (

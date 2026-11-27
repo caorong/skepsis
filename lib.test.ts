@@ -23,7 +23,7 @@ import { isolateVcsConfig, run } from './server/testUtil.ts'
 
 // See server/main.test.ts: HOME must be isolated before the server loads.
 const home = await isolateVcsConfig()
-const { createApp } = await import('./lib.ts')
+const { createApp, createRemoteProxyApp } = await import('./lib.ts')
 
 let tmp: string
 /** A git repo with sub/f.txt changed from "before" to "after" in the working tree */
@@ -166,4 +166,139 @@ if (args[0] === 'worktree' && args[1] === 'current') {
   ).json()) as OrcaTargetsResponse
   expect(targets.workspace).toBe('Test WT')
   expect(targets.fresh).toEqual([{ id: 'codex', label: 'Codex' }])
+})
+
+it('createRemoteProxyApp proxies data APIs and routes Orca delivery via --environment', async () => {
+  const remoteApp = await createApp({
+    cwd: repo,
+    revisions: 'HEAD',
+    repositoryBrowser: true,
+  })
+  const remoteRoot = '/remote/orderly-voucher-calc'
+
+  const bin = join(tmp, 'fake-remote-orca')
+  await writeFile(
+    bin,
+    `#!/usr/bin/env node
+const args = process.argv.slice(2);
+const reply = (result) => console.log(JSON.stringify({ ok: true, result }));
+if (args[0] !== '--environment' || args[1] !== 'orderlyClaw2') {
+  console.log(JSON.stringify({ ok: false, error: { code: 'missing_env' } }));
+  process.exit(1);
+}
+const rest = args.slice(2);
+if (rest[0] === 'worktree' && rest[1] === 'show' && rest[3] === 'path:${remoteRoot}') {
+  reply({ worktree: { id: 'repo-1::${remoteRoot}', path: '${remoteRoot}', displayName: 'Remote Voucher', hostId: 'local' } });
+} else if (rest[0] === 'agent' && rest[1] === 'list') {
+  reply({ agents: [] });
+} else if (rest[0] === 'agent' && rest[1] === 'installed') {
+  reply({ agents: [{ id: 'codex', name: 'Codex' }] });
+} else if (rest[0] === 'agent' && rest[1] === 'launch') {
+  reply({ worktreeId: 'repo-1::${remoteRoot}', outcome: { kind: 'structured' }, prompt: { outcome: 'journaled' } });
+} else {
+  process.exit(1);
+}
+`,
+    { mode: 0o755 },
+  )
+
+  const proxy = createRemoteProxyApp({
+    remoteRoot,
+    remoteFetch: (req) => {
+      const headers = new Headers(req.headers)
+      if (remoteApp.token) headers.set(TOKEN_HEADER, remoteApp.token)
+      return Promise.resolve(remoteApp.fetch(new Request(req, { headers })))
+    },
+    orca: { environment: 'orderlyClaw2', expectedHostId: 'local', binary: bin },
+  })
+
+  expect((await proxy.fetch(new Request('http://127.0.0.1:4321/api/diff'))).status).toBe(
+    401,
+  )
+
+  const headers = {
+    [TOKEN_HEADER]: proxy.token!,
+    host: '127.0.0.1:4321',
+    origin: 'http://127.0.0.1:4321',
+  }
+  const diff = (await (
+    await proxy.fetch(new Request('http://127.0.0.1:4321/api/diff', { headers }))
+  ).json()) as DiffResponse
+  expect(diff.orca).toBe(true)
+  expect(diff.send).toBe(true)
+  expect(diff.repositoryBrowser).toBe(true)
+  expect(diff.patch).toContain('-before\n+after')
+
+  const targets = (await (
+    await proxy.fetch(new Request('http://127.0.0.1:4321/api/orca/targets', { headers }))
+  ).json()) as OrcaTargetsResponse
+  expect(targets.workspace).toBe('Remote Voucher')
+  expect(targets.fresh).toEqual([{ id: 'codex', label: 'Codex' }])
+
+  // Sending from Diff view works and checks Origin gate.
+  expect(
+    (
+      await proxy.fetch(
+        new Request('http://127.0.0.1:4321/api/orca/send', {
+          method: 'POST',
+          headers: {
+            ...headers,
+            origin: 'https://evil.example',
+            'content-type': 'application/json',
+          },
+          body: JSON.stringify({
+            target: { kind: 'new', id: 'codex' },
+            file: 'sub/f.txt',
+            side: 'additions',
+            lines: [1, 1],
+            columns: null,
+            code: null,
+            blob: null,
+            text: 'Check this',
+          }),
+        }),
+      )
+    ).status,
+  ).toBe(403)
+
+  const diffSend = await proxy.fetch(
+    new Request('http://127.0.0.1:4321/api/orca/send', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        target: { kind: 'new', id: 'codex' },
+        file: 'sub/f.txt',
+        side: 'additions',
+        lines: [1, 1],
+        columns: null,
+        code: null,
+        blob: null,
+        text: 'Check this diff line',
+      }),
+    }),
+  )
+  expect(diffSend.status).toBe(200)
+  expect(await diffSend.json()).toEqual({ status: 'Started in Orca' })
+
+  // Sending from Files view fetches remote snapshot and delivers to remote Orca agent.
+  const fileSnap = (await (
+    await proxy.fetch(
+      new Request('http://127.0.0.1:4321/api/repository-file?path=sub/f.txt', { headers }),
+    )
+  ).json()) as { path: string; revision: string }
+  const fileSend = await proxy.fetch(
+    new Request('http://127.0.0.1:4321/api/repository-review', {
+      method: 'POST',
+      headers: { ...headers, 'content-type': 'application/json' },
+      body: JSON.stringify({
+        path: fileSnap.path,
+        revision: fileSnap.revision,
+        lines: [1, 1],
+        text: 'Check this full-file line',
+        target: { kind: 'new', id: 'codex' },
+      }),
+    }),
+  )
+  expect(fileSend.status).toBe(200)
+  expect(await fileSend.json()).toEqual({ status: 'Started in Orca' })
 })

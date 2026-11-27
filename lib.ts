@@ -16,10 +16,12 @@ import { buildApp } from './server/app.ts'
 import type { App } from './server/app.ts'
 import { buildDiffSource, detectVcs, repoRoot } from './server/diffSource.ts'
 import { createOrcaBridge, orcaRunner } from './server/orca.ts'
+import { buildRemoteProxyApp } from './server/remoteProxy.ts'
+import type { RemoteProxyOptions } from './server/remoteProxy.ts'
 import { callSend } from './server/send.ts'
 import type { SendFunction, SendPayload } from './server/send.ts'
 
-export type { App, SendFunction, SendPayload }
+export type { App, RemoteProxyOptions, SendFunction, SendPayload }
 
 export interface AppOptions {
   /** The root of a jj workspace or git worktree, as an absolute path. jj or
@@ -102,4 +104,11 @@ export async function createApp(opts: AppOptions): Promise<App> {
     orca: orca ? createOrcaBridge(root, orcaRunner(root, orcaBinary)) : undefined,
     repositoryBrowser,
   })
+}
+
+/** A local proxy `App` that serves static UI assets locally while forwarding
+ *  diff/file/symbol APIs to a remote Skepsis instance and Orca delivery to the
+ *  local Orca CLI (`--environment`). */
+export function createRemoteProxyApp(opts: RemoteProxyOptions): App {
+  return buildRemoteProxyApp(opts)
 }

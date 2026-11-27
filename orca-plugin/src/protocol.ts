@@ -6,13 +6,20 @@
  * Copyright Oxide Computer Company
  */
 
+export type WorkspaceTransportKind = 'local' | 'remote-orca' | 'remote-ssh' | 'unsupported'
+
 export type FocusedWorkspace = {
   id: string
   name: string
   branch: string | null
   path: string | null
   kind: 'worktree' | 'folder' | null
-  isLocal: boolean
+  hostId: string | null
+  transport: WorkspaceTransportKind
+  hostLabel: string
+  sshHost: string | null
+  environmentName: string | null
+  supported: boolean
   reason: string | null
 }
 
@@ -22,6 +29,9 @@ export type MountedSummary = {
   name: string
   branch: string | null
   path: string
+  hostId: string | null
+  hostLabel: string
+  isRemote: boolean
   url: string
   diffBase: string
   startedAt: number
@@ -53,7 +63,10 @@ declare module 'orca' {
     'skepsis.status': { output: PluginState }
     'skepsis.open': { input: OpenReviewInput | undefined; output: OpenReviewOutput }
     'skepsis.stop': { output: PluginState }
-    'skepsis.unmount': { input: { path: string }; output: PluginState }
+    'skepsis.unmount': {
+      input: { path: string; hostId?: string | null }
+      output: PluginState
+    }
   }
   interface PluginPanelEvents {
     'skepsis.state': PluginState
