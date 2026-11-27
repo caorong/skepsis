@@ -290,48 +290,38 @@ isn't the page's own.
 
 ## Send review comments to Orca
 
-### Quick start with npx
+### Install and run
 
 Use Node.js 22 or later and Orca v1.4.277 or later. Open the checkout you want
 to review as a local Orca workspace. If `command -v orca` finds nothing,
 register the CLI in Orca under **Settings → General → Orca CLI**.
 
+Clone and build this fork once:
+
+```sh
+mkdir -p "$HOME/src"
+git clone https://github.com/caorong/skepsis.git "$HOME/src/skepsis"
+(cd "$HOME/src/skepsis" && npm ci && npm run build)
+```
+
 From the **checkout you want to review**, run:
 
 ```sh
-npx --yes --package='git+https://github.com/caorong/skepsis.git#main' -- skepsis --orca
+node "$HOME/src/skepsis/dist/cli.js" --orca
 ```
 
-This downloads and builds this fork on first use; there is no manual clone or
-npm registry publish step. `--orca` is a Skepsis runtime option, not an install
-option. It enables the Orca agent picker for this run. Omit it to use ordinary
-local review without connecting to Orca.
-
-### Updates and other ways to run
-
-An already-open Skepsis instance does not update while it runs. On a later
-launch, npm can reuse the cached build for the same Git commit. To explicitly
-use the latest commit on GitHub's `main`, resolve the commit first:
+`--orca` enables the Orca agent picker for this run. Omit it to use ordinary
+local review without connecting to Orca. To update an existing clone on
+`main`, run:
 
 ```sh
-sha=$(git ls-remote https://github.com/caorong/skepsis.git refs/heads/main | awk '{print $1}')
-[ -n "$sha" ] && npx --yes --package="git+https://github.com/caorong/skepsis.git#$sha" -- skepsis --orca
+(cd "$HOME/src/skepsis" && git switch main && git pull --ff-only && npm ci && npm run build)
 ```
 
-For a persistent command, install the fork globally, then run
-`skepsis --orca` from the checkout you want to review:
-
-```sh
-npm install -g 'git+https://github.com/caorong/skepsis.git#main'
-```
-
-A global installation does not update on launch. Re-run the install command to
-update it. If you already have the upstream Skepsis installed globally, prefer
-`npx` for this fork so the two versions do not share the global command name.
-
-To build from source, run `npm ci && npm run build` in this fork's checkout.
-Then run `node /path/to/skepsis/dist/cli.js --orca` from the checkout you want
-to review.
+Restart Skepsis after the rebuild. Direct `npx` execution from the Git URL can
+fail before Skepsis starts with
+`GitFetcher requires an Arborist constructor to pack a tarball`. Use the
+source build above if you see this error.
 
 ### Sending a comment
 
