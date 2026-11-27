@@ -292,9 +292,11 @@ isn't the page's own.
 
 ### Install and run
 
-Use Node.js 22 or later and Orca v1.4.277 or later. Open the checkout you want
-to review as a local Orca workspace. If `command -v orca` finds nothing,
-register the CLI in Orca under **Settings → General → Orca CLI**.
+For the source build, use Node.js 24.11 or later in the 24.x series
+(recommended), Node.js 22.18 or later in the 22.x series, or Node.js 26 or
+later. Use Orca v1.4.277 or later and open the checkout you want to review as
+a local Orca workspace. If `command -v orca` finds nothing, register the CLI
+in Orca under **Settings → General → Orca CLI**.
 
 Clone and build this fork once:
 
